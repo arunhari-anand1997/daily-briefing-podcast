@@ -32,10 +32,10 @@ its own validation rather than riding on tomorrow's live cron.
   Economist/Foreign Affairs. Current behavior = the v6.1 Sonar "find and quote
   the argument" fallback when an article body is unreachable. Decide which
   outlets you have subscriptions for and whether to wire credentials.
-- **Markets skill.** Economy/markets still uses the Yahoo v8 chart endpoint via
-  a proxy-bypass opener (preserved + working). The `finance/finance-markets`
-  skill (pre-IPO names, debt, KPIs, options) would be a richer ground-truth
-  source — not yet integrated.
+- **Markets skill.** Economy prices use the Yahoo v8 chart endpoint and macro
+  releases now use real FRED data (`macro.py`) — both ground truth. The richer
+  `finance/finance-markets` skill (pre-IPO names, debt, KPIs, options) is still
+  an optional upgrade, not yet integrated.
 
 ## Editorial mechanisms
 
@@ -59,6 +59,21 @@ its own validation rather than riding on tomorrow's live cron.
 - **Closed-loop chapter feedback.** Per-chapter one-click thumbs-up/down links
   in the delivery email writing back to a repo feedback file. Needs an endpoint
   to receive clicks; not built.
+
+## Resolved after the v8 transcript review
+
+- **Macro grounding** — real FRED data now feeds the economy segment (was a
+  Sonar hallucination that reported core PCE "cooled to 2.6%" when it had risen
+  to 3.4%).
+- **US politics sourcing** — dedicated `us_politics` research beat added.
+- **Cold open** — now synthesized from the finished body segments, so the
+  headline scan can't contradict the body.
+- **Recency** — a recency-audit pass re-anchors stale events (e.g. an old NBA
+  result narrated as "Thursday") against today's date.
+
+Still open on the editorial side: the dedicated adversarial-pair finder, host-
+canon memory, self-critique pass, topic-touch report, and the X/trends layers
+above.
 
 ## Notes
 

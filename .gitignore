@@ -16,6 +16,11 @@ __pycache__/
 .venv/
 venv/
 
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
 # Build artifacts / backups from local iteration
 *.bak.py
 _*_patch.py

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Daily Briefing Podcast Generator (v3 — wide-net research + curator + balance)
+Daily Briefing Podcast Generator (v7 — tiered memory + two-pass curator + editorial intelligence)
 
 Pipeline:
   1. Load recent episode recaps (last 7 days) from local store
@@ -53,6 +53,11 @@ from typing import Any
 
 import httpx
 
+# v7 Tier 2/3 modules — pure data layer + curation/editorial helpers.
+import memory
+import curator as curator_mod
+import editorial
+
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
 # BASE_DIR can be overridden via PODCAST_BASE_DIR (e.g. on GitHub Actions where the
@@ -86,6 +91,14 @@ CRYPTO = ["BTC", "ETH", "SOL"]
 
 # How many days of recap memory to feed back to the writer
 RECAP_LOOKBACK_DAYS = 7
+
+# v7 two-pass curator + editorial intelligence (Tier 2/3) is now the DEFAULT
+# path. The v6.1 single-pass behaviour remains available as a kill-switch:
+# set TWO_PASS_CURATOR=0 (or pass --no-two-pass-curator) to fall back if v7
+# ever misbehaves on the daily cron, without needing a revert.
+TWO_PASS_CURATOR_ENV = (
+    os.environ.get("TWO_PASS_CURATOR", "1").strip().lower() not in ("0", "false", "no")
+)
 
 # OpenAI TTS limit: 4096 chars per call. Keep chunks well under.
 TTS_CHUNK_CHAR_BUDGET = 3500
@@ -695,8 +708,16 @@ Be precise. Topics should be granular enough that another agent could ask 'was X
 Entities should be canonical names ('OpenAI' not 'open ai', 'NVDA' not 'Nvidia stock')."""
 
 
-def extract_recap(dialogue: list[dict[str, str]], date_str: str) -> dict[str, Any]:
-    """Generate a structured recap from today's full script."""
+def extract_recap(dialogue: list[dict[str, str]], date_str: str,
+                  curated_segments: dict[str, list[dict[str, Any]]] | None = None
+                  ) -> dict[str, Any]:
+    """Generate a structured recap from today's full script.
+
+    When ``curated_segments`` is supplied (v7 two-pass mode) the recap also gains
+    a ``topic_details`` list pairing each topic with the actual narration lines
+    that covered it, so future episodes can quote prior framing. The high-level
+    headline/topics/entities/summary fields are unchanged.
+    """
     # Compact the dialogue into plain prose for the extraction prompt
     transcript_parts: list[str] = []
     for line in dialogue:
@@ -730,6 +751,11 @@ def extract_recap(dialogue: list[dict[str, str]], date_str: str) -> dict[str, An
                  "_parse_error": str(e), "_raw": raw[:2000]}
 
     recap["date"] = date_str
+    if curated_segments:
+        try:
+            recap["topic_details"] = editorial.build_topic_details(dialogue, curated_segments)
+        except Exception as e:  # noqa: BLE001 — enrichment is non-fatal
+            print(f"[recap] topic_details build failed (non-fatal): {e}", file=sys.stderr)
     return recap
 
 
@@ -1415,7 +1441,7 @@ RECENT EPISODES (last {lookback} days)
 CURATED TOPICS FOR THIS SEGMENT (these have been pre-selected and ranked by the editor; use ALL of them, don't add more)
 ================
 {research_block}
-
+{timeline_block}{running_threads_block}
 PREVIOUS SEGMENTS WRITTEN TODAY (for tone + callback continuity, do NOT repeat content)
 ================
 {prior_segments_block}
@@ -1792,7 +1818,9 @@ def write_segment(seg: dict[str, Any],
                   prior_segments: list[list[dict[str, str]]],
                   date_str: str,
                   editor_note: str = "",
-                  buzzing_block: str = "") -> list[dict[str, str]]:
+                  buzzing_block: str = "",
+                  running_threads_block: str = "",
+                  timeline_block: str = "") -> list[dict[str, str]]:
     """Generate one segment of dialogue from CURATED topics."""
     # Short-circuit: empty topics in a content segment — emit honest skip line
     # rather than letting the model hallucinate.
@@ -1826,6 +1854,9 @@ def write_segment(seg: dict[str, Any],
         research_block=topics_block,
         prior_segments_block=prior_block,
         editor_note=editor_note or "(no editor note)",
+        # v7 blocks render as their own sections only when populated.
+        timeline_block=(f"\n{timeline_block}\n" if timeline_block else ""),
+        running_threads_block=(f"\n{running_threads_block}\n" if running_threads_block else ""),
     )
 
     max_tokens = max(2500, int(seg["words"] * 4.0))
@@ -1877,7 +1908,9 @@ def generate_script(curated: dict[str, Any],
                     markets: str,
                     recap_block: str,
                     segments: list[dict[str, Any]],
-                    date_str: str) -> list[dict[str, str]]:
+                    date_str: str,
+                    recaps: list[dict[str, Any]] | None = None,
+                    two_pass: bool = False) -> list[dict[str, str]]:
     # v6.1: pre-fetch deep source material for the arguments segment
     _args_topics = (curated.get("segments") or {}).get("arguments") or []
     buzzing_enriched: list[dict[str, Any]] = []
@@ -1903,12 +1936,32 @@ def generate_script(curated: dict[str, Any],
     seg_picks = curated.get("segments", {})
     editor_note = curated.get("editor_note", "")
 
+    # v7: editorial intelligence. Running threads are computed once (same for the
+    # whole episode); the story-timeline lookback is per-segment.
+    _today_obj = dt.date.fromisoformat(date_str) if isinstance(date_str, str) else dt.date.today()
+    running_block = ""
+    if two_pass and recaps:
+        try:
+            running_block = editorial.format_running_threads_block(
+                editorial.detect_running_threads(recaps), _today_obj)
+        except Exception as e:  # noqa: BLE001
+            print(f"[editorial] running-thread detection failed (non-fatal): {e}", file=sys.stderr)
+
     for seg in segments:
         topics = seg_picks.get(seg["key"], [])
         _seg_buzz = buzzing_block_str if seg["key"] == "arguments" else ""
+        timeline_block = ""
+        if two_pass and recaps:
+            try:
+                timeline_block = _build_timeline_block(topics, recaps, _today_obj)
+            except Exception as e:  # noqa: BLE001
+                print(f"[editorial] timeline build failed for {seg['key']} (non-fatal): {e}",
+                      file=sys.stderr)
         lines = write_segment(seg, topics, markets, recap_block,
                               prior_segments, date_str, editor_note,
-                              buzzing_block=_seg_buzz)
+                              buzzing_block=_seg_buzz,
+                              running_threads_block=running_block,
+                              timeline_block=timeline_block)
 
         # Prepend a hardcoded intro line for segments that have one defined.
         intro = SEGMENT_INTROS.get(seg["key"])
@@ -1927,6 +1980,105 @@ def generate_script(curated: dict[str, Any],
     return all_lines
 
 
+
+
+# ─── v7 EDITORIAL / MEMORY WIRING ────────────────────────────────────────────
+# Thin glue between podcast.py and the pure memory/curator/editorial modules.
+# Everything here is best-effort: a failure logs and degrades to v6.1 behaviour
+# rather than killing the run.
+
+def _build_timeline_block(topics: list[dict[str, Any]],
+                          recaps: list[dict[str, Any]],
+                          today: dt.date) -> str:
+    """For topics the curator labelled update/thread_continuation, look up the
+    prior episode's actual narration and render a writer-prompt timeline block."""
+    updates: list[dict[str, Any]] = []
+    for t in topics or []:
+        if t.get("status") not in ("update", "thread_continuation"):
+            continue
+        ents = {e.lower() for e in (t.get("entities") or [])}
+        ents |= editorial.entity_set(f"{t.get('headline', '')} {t.get('detail', '')}")
+        prior = editorial.find_prior_narration(recaps, entities=ents, today=today)
+        if prior:
+            updates.append({"topic": t.get("headline", ""),
+                            "update_note": t.get("update_note", ""), "prior": prior})
+    return editorial.format_timeline_block(updates)
+
+
+def run_two_pass_curation(curated: dict[str, Any], recap_block: str,
+                          recaps: list[dict[str, Any]], date_str: str) -> dict[str, Any]:
+    """Pass 2: label Pass-1 picks against memory and drop repeats (non-fatal)."""
+    open_threads = memory.load_open_threads(RECAPS_DIR)
+    weekly = memory.latest_weekly_digest(RECAPS_DIR)
+    return curator_mod.memory_review(
+        curated, recaps_block=recap_block, open_threads=open_threads,
+        weekly_digest=weekly, date_str=date_str, chat_fn=pplx_chat,
+        model=CURATOR_MODEL, preamble=today_preamble(),
+        log=lambda m: print(m, file=sys.stderr))
+
+
+def update_open_threads_file(curated: dict[str, Any],
+                             recaps: list[dict[str, Any]], date_str: str) -> None:
+    """Evolve open_threads.json: age out dormant threads, upsert the arcs the
+    curator flagged as updates/continuations this episode."""
+    today = dt.date.fromisoformat(date_str)
+    ot = memory.load_open_threads(RECAPS_DIR)
+    memory.mark_dormant_threads(ot, today)
+    for items in (curated.get("segments") or {}).values():
+        for it in items or []:
+            if it.get("status") not in ("update", "thread_continuation"):
+                continue
+            label = (it.get("headline") or "")[:90]
+            tid = (it.get("relates_to_thread_id") or "").strip() or memory.slugify_thread(label)
+            hooks = [it["update_note"]] if it.get("update_note") else []
+            memory.upsert_thread(ot, thread_id=tid, label=label,
+                                 episode_date=date_str, hooks=hooks)
+    ot["updated"] = date_str
+    path = memory.save_open_threads(RECAPS_DIR, ot)
+    print(f"[open-threads] {len(ot.get('threads', []))} tracked → {path.name}", file=sys.stderr)
+
+
+def maybe_generate_digests(date_str: str) -> None:
+    """Generate weekly/monthly digests when due (Sunday / 1st) or missing.
+
+    Each is independently guarded and non-fatal so digest generation can never
+    block delivery of the episode.
+    """
+    today = dt.date.fromisoformat(date_str)
+
+    # Weekly — for the week that just finished (or is finishing today if Sunday).
+    try:
+        is_sunday = today.isoweekday() == 7
+        ref = today if is_sunday else today - dt.timedelta(days=today.isoweekday())
+        mon, sun = memory.iso_week_bounds(ref)
+        iso_wk = memory.iso_week_key(ref)
+        if is_sunday or not memory.weekly_digest_exists(RECAPS_DIR, iso_wk):
+            week_recaps = memory.load_daily_recaps_in_range(RECAPS_DIR, mon, sun)
+            if week_recaps:
+                digest = curator_mod.generate_weekly_digest(
+                    week_recaps, iso_week=iso_wk, start_date=mon.isoformat(),
+                    end_date=sun.isoformat(), chat_fn=pplx_chat, model=RECAP_MODEL)
+                path = memory.save_weekly_digest(RECAPS_DIR, digest)
+                print(f"[digest] weekly {path.name}: {len(digest.get('threads', []))} threads",
+                      file=sys.stderr)
+    except Exception as e:  # noqa: BLE001
+        print(f"[digest] weekly generation failed (non-fatal): {e}", file=sys.stderr)
+
+    # Monthly — for the previous, just-finished month.
+    try:
+        last_prev = today.replace(day=1) - dt.timedelta(days=1)
+        mkey = memory.month_key(last_prev)
+        if today.day == 1 or not memory.monthly_digest_exists(RECAPS_DIR, mkey):
+            month_recaps = memory.load_daily_recaps_in_range(
+                RECAPS_DIR, last_prev.replace(day=1), last_prev)
+            if month_recaps:
+                digest = curator_mod.generate_monthly_digest(
+                    month_recaps, month=mkey, chat_fn=pplx_chat, model=RECAP_MODEL)
+                path = memory.save_monthly_digest(RECAPS_DIR, digest)
+                print(f"[digest] monthly {path.name}: {len(digest.get('threads', []))} threads",
+                      file=sys.stderr)
+    except Exception as e:  # noqa: BLE001
+        print(f"[digest] monthly generation failed (non-fatal): {e}", file=sys.stderr)
 
 
 # ─── TTS ─────────────────────────────────────────────────────────────────────
@@ -2088,7 +2240,15 @@ def main() -> int:
                         help="Regenerate today's recap from existing script.json")
     parser.add_argument("--from-script", action="store_true",
                         help="Skip research+curator+writer; render audio from existing script.json")
+    parser.add_argument("--two-pass-curator", action=argparse.BooleanOptionalAction,
+                        default=TWO_PASS_CURATOR_ENV,
+                        help="v7 Tier 2/3: memory-review pass, story timeline, running "
+                             "threads, weekly/monthly digests. Default ON; use "
+                             "--no-two-pass-curator (or TWO_PASS_CURATOR=0) for v6.1.")
     args = parser.parse_args()
+    two_pass = args.two_pass_curator
+    print(f"[v7] two-pass curator + editorial intelligence "
+          f"{'ENABLED' if two_pass else 'DISABLED (v6.1 fallback)'}", file=sys.stderr)
 
     today = dt.date.today().isoformat()
     work_dir = EPISODES_DIR / today
@@ -2158,13 +2318,16 @@ def main() -> int:
     (work_dir / "markets.txt").write_text(markets)
 
     print("[4/7] Curator (rank + balance)…", file=sys.stderr)
-    curated = curate_topics(research, recap_block, today)
-    curated = programmatic_dedupe(curated, recaps, today)
-    (work_dir / "curated.json").write_text(json.dumps(curated, indent=2))
+    curated = curate_topics(research, recap_block, today)          # Pass 1: routing
+    if two_pass:
+        print("[4b/7] Memory review (Pass 2: new/update/repeat labels)…", file=sys.stderr)
+        curated = run_two_pass_curation(curated, recap_block, recaps, today)
+    curated = programmatic_dedupe(curated, recaps, today)          # hard safety net
     (work_dir / "curated.json").write_text(json.dumps(curated, indent=2))
 
     print(f"[5/7] Script ({len(segments)} segments, multi-pass)…", file=sys.stderr)
-    dialogue = generate_script(curated, markets, recap_block, segments, today)
+    dialogue = generate_script(curated, markets, recap_block, segments, today,
+                               recaps=recaps, two_pass=two_pass)
     print("[5/6] Fact-checking numeric claims…", file=sys.stderr)
     dialogue, fc_log = fact_check_script(dialogue, today)
     for ln in fc_log:
@@ -2176,9 +2339,19 @@ def main() -> int:
           f"(~{total_words/150:.1f} min target)", file=sys.stderr)
 
     print("[6/7] Recap extraction…", file=sys.stderr)
-    recap = extract_recap(dialogue, today)
+    recap = extract_recap(dialogue, today,
+                          curated_segments=curated.get("segments") if two_pass else None)
     recap_path = RECAPS_DIR / f"{today}.json"
     recap_path.write_text(json.dumps(recap, indent=2))
+
+    if two_pass:
+        # Evolve the hot open-threads file and roll up weekly/monthly digests.
+        # Both are best-effort — never block the episode on memory bookkeeping.
+        try:
+            update_open_threads_file(curated, recaps, today)
+        except Exception as e:  # noqa: BLE001
+            print(f"[open-threads] update failed (non-fatal): {e}", file=sys.stderr)
+        maybe_generate_digests(today)
 
     if args.skip_tts:
         result = {

@@ -1,7 +1,7 @@
 # Daily briefing podcast
 
 A self-hosted daily news/analysis podcast that runs on GitHub Actions, writes a
-~70-minute script, renders it with OpenAI TTS, uploads the MP3 to Google Drive,
+~120-minute script, renders it with OpenAI TTS, uploads the MP3 to Google Drive,
 and emails you the listen link with chapter markers.
 
 Architecture (v6.1):
@@ -52,6 +52,21 @@ modules (`memory.py`, `curator.py`, `editorial.py`):
 - **Running-thread signal** — entities appearing in 3+ of the last 7 episodes
   are surfaced to the writer (max 2–3 per episode) so it can acknowledge an arc
   without repetition.
+
+### v8 — taste-spec editorial structure
+
+v8 reshapes the *editorial* side toward a broad, conversation-fluency brief: an
+~120-minute, 11-segment broadcast lineup (cold open & headlines → hard news →
+politics → economy → tech & AI → science → feature/longform → culture → sports
+→ room for disagreement → outro), two named host archetypes — **Host A** (Maya,
+Technocratic Systems Explainer) and **Host B** (Ben, Heterodox Narrative
+Skeptic) with per-segment leads — explicit topic-balance rules (daily
+minimums + caps, with **Tech & AI deliberately capped**), and per-segment
+freshness windows. All v6.x/v7 plumbing is preserved (real Yahoo markets,
+`today_preamble`, dedupe, numeric fact-check, buzzing fetch, recap memory,
+two-pass curator). The taste spec's new *data* subsystems (X list feeds, trends
+scraping, adversarial-pair finder, host-canon memory, self-critique pass,
+feedback loop) are tracked in [`DEFERRED.md`](DEFERRED.md).
 
 ## How it runs
 
@@ -162,6 +177,7 @@ oauth_setup.py          # one-time helper to mint the Drive OAuth refresh token
 memory.py               # v7 tiered-recap data layer (daily/weekly/monthly/threads)
 curator.py              # v7 Pass 2 memory review + weekly/monthly digest gen
 editorial.py            # v7 running-threads + story-timeline helpers
+DEFERRED.md             # v8 taste-spec items not yet built (sourcing/feedback)
 tests/                  # pytest suite for memory/curator/editorial + wiring
 recaps/                 # dedupe memory (committed; do not delete)
   YYYY-MM-DD.json       #   daily recap (v7 adds per-topic narration)

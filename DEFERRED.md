@@ -62,9 +62,15 @@ its own validation rather than riding on tomorrow's live cron.
 
 ## Resolved after the v8 transcript review
 
-- **Macro grounding** — real FRED data now feeds the economy segment (was a
-  Sonar hallucination that reported core PCE "cooled to 2.6%" when it had risen
-  to 3.4%).
+- **Macro correctness** — the economy segment is no longer exempt from the
+  numeric fact-check (it only shielded hallucinated macro like core PCE "2.6%"
+  when it had really risen to 3.4%). Now every segment is fact-checked and only
+  the exact injected ground-truth numbers (Yahoo prices) are protected, so
+  macro claims get web-verified and corrected. A FRED fetch (`macro.py`) is
+  attempted as a bonus but is BLOCKED on GitHub's runners (ReadTimeout); it
+  fails fast and the fact-check is the real macro safety net. Wiring a
+  runner-reachable macro source (FRED API key, or a data MCP) is a future
+  upgrade if hard ground truth is wanted.
 - **US politics sourcing** — dedicated `us_politics` research beat added.
 - **Cold open** — now synthesized from the finished body segments, so the
   headline scan can't contradict the body.

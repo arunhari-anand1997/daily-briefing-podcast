@@ -2,3 +2,5 @@ httpx>=0.27
 rapidfuzz>=3.5
 google-api-python-client>=2.100
 google-auth>=2.20
+# Only needed locally for the one-time `python oauth_setup.py` token mint.
+google-auth-oauthlib>=1.0

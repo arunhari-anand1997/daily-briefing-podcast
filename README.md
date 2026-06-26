@@ -47,18 +47,30 @@ End-to-end ~10-15 minutes; well under the 6-hour Actions wall-clock limit.
   (needs access to `gpt-4o-mini-tts` or the model named in `TTS_MODEL` in
   `podcast.py`)
 
-### 2. Google Drive service account
+### 2. Google Drive OAuth
 
-The Drive upload uses a service account (not OAuth) so it works headlessly.
+The Drive upload authenticates **as you** via an OAuth refresh token, so files
+land in your own Drive and use your quota. (A service account has no Drive
+storage of its own and returns `403 storageQuotaExceeded` on upload unless you
+have a Workspace Shared Drive — OAuth works on free Gmail.)
 
 1. In [Google Cloud Console](https://console.cloud.google.com/), create or
-   pick a project.
-2. Enable the **Google Drive API**.
-3. Create a **service account** under IAM & Admin → Service Accounts.
-4. Add a JSON key to that service account and download it.
-5. Open your destination Google Drive folder, click "Share", and grant the
-   service account's email address Editor access.
-6. Copy the folder ID from the URL: `drive.google.com/drive/folders/<this part>`.
+   pick a project and enable the **Google Drive API**.
+2. Configure the **OAuth consent screen** (User type: External). Add your own
+   Gmail address under **Test users** so the unverified app keeps working for
+   you indefinitely.
+3. Create **Credentials → OAuth client ID → Application type: Desktop app**.
+   Download the client JSON (or note its client ID + secret).
+4. Mint a refresh token once, locally:
+   ```bash
+   pip install google-auth-oauthlib
+   python oauth_setup.py --client-secrets-file client_secret.json
+   ```
+   It opens a browser, you grant access, and it prints
+   `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, and
+   `GOOGLE_OAUTH_REFRESH_TOKEN` to paste into your secrets.
+5. Pick the destination folder in your My Drive and copy its ID from the URL:
+   `drive.google.com/drive/folders/<this part>`.
 
 ### 3. Gmail SMTP
 
@@ -75,7 +87,9 @@ Add these under **Settings → Secrets and variables → Actions** in this repo:
 | --- | --- |
 | `PERPLEXITY_API_KEY` | `pplx-...` |
 | `OPENAI_API_KEY` | `sk-...` |
-| `GOOGLE_DRIVE_SA_JSON` | Either the raw JSON contents of your service-account key, or that JSON base64-encoded (`base64 -i sa.json`) |
+| `GOOGLE_OAUTH_CLIENT_ID` | From `oauth_setup.py` (step 2) |
+| `GOOGLE_OAUTH_CLIENT_SECRET` | From `oauth_setup.py` (step 2) |
+| `GOOGLE_OAUTH_REFRESH_TOKEN` | From `oauth_setup.py` (step 2) |
 | `GOOGLE_DRIVE_FOLDER_ID` | The folder ID from step 2 |
 | `GMAIL_ADDRESS` | Your Gmail address |
 | `GMAIL_APP_PASSWORD` | 16-char app password |

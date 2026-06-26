@@ -7,11 +7,18 @@ Reads JSON result from podcast.py stdout (passed via --result-json) and:
   3. Sends an HTML email with the listen link, chapters, and editor note
 
 Env vars required:
-  GOOGLE_DRIVE_SA_JSON     — service-account JSON, base64-encoded (single line)
-  GOOGLE_DRIVE_FOLDER_ID   — Drive folder ID; folder must be shared with SA email
-  GMAIL_ADDRESS            — your Gmail address (used as SMTP user + From)
-  GMAIL_APP_PASSWORD       — 16-char Gmail App Password
-  EMAIL_TO                 — recipient address
+  GOOGLE_OAUTH_CLIENT_ID      — OAuth client ID (Desktop app) from Google Cloud
+  GOOGLE_OAUTH_CLIENT_SECRET  — OAuth client secret for that client
+  GOOGLE_OAUTH_REFRESH_TOKEN  — refresh token from one-time `oauth_setup.py` run
+  GOOGLE_DRIVE_FOLDER_ID      — Drive folder ID in YOUR My Drive (uploads use your quota)
+  GMAIL_ADDRESS               — your Gmail address (used as SMTP user + From)
+  GMAIL_APP_PASSWORD          — 16-char Gmail App Password
+  EMAIL_TO                    — recipient address
+
+Uploads authenticate as you via OAuth (not a service account), so files land in
+your own Drive and consume your storage quota. Service accounts have no Drive
+quota of their own, which is why the SA approach 403s with `storageQuotaExceeded`
+unless you have a Workspace Shared Drive. OAuth delegation works on free Gmail.
 
 Optional:
   EMAIL_SUBJECT_PREFIX     — default "Your daily briefing"
@@ -19,7 +26,6 @@ Optional:
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import os
 import smtplib
@@ -29,24 +35,31 @@ from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 
-from google.oauth2 import service_account
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 
 WPM = 150  # for chapter timestamping
 
+# drive.file scope = per-file access to files this app creates/opens. Enough to
+# upload episodes into a folder you point at; does not grant broad Drive access.
+DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+
 
 def _drive_service():
-    sa_blob = os.environ["GOOGLE_DRIVE_SA_JSON"]
-    # Accept either raw JSON or base64-encoded JSON (Actions secret friendly).
-    try:
-        info = json.loads(sa_blob)
-    except json.JSONDecodeError:
-        info = json.loads(base64.b64decode(sa_blob).decode("utf-8"))
-    creds = service_account.Credentials.from_service_account_info(
-        info, scopes=["https://www.googleapis.com/auth/drive.file"]
+    # Authenticate as the user via a stored OAuth refresh token. The token is
+    # long-lived; we exchange it for a short-lived access token on each run.
+    creds = Credentials(
+        token=None,
+        refresh_token=os.environ["GOOGLE_OAUTH_REFRESH_TOKEN"],
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=os.environ["GOOGLE_OAUTH_CLIENT_ID"],
+        client_secret=os.environ["GOOGLE_OAUTH_CLIENT_SECRET"],
+        scopes=DRIVE_SCOPES,
     )
+    creds.refresh(Request())
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 

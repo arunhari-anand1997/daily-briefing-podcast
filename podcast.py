@@ -1,0 +1,2222 @@
+#!/usr/bin/env python3
+"""
+Daily Briefing Podcast Generator (v3 — wide-net research + curator + balance)
+
+Pipeline:
+  1. Load recent episode recaps (last 7 days) from local store
+  2. WIDE-NET research: 15 beats across all domains (geopolitics, economics, science,
+     biotech, tech/AI, startups, Twitter discourse, Reddit, Substack essays, podcasts,
+     literature, history, culture, sports, wild studies)
+  3. Pull live markets data via Perplexity
+  4. CURATOR pass — Sonar ranks all candidates, enforces cross-domain balance,
+     emits a final topic pool plus a cutting-room-floor list of runners-up
+  5. Generate the script SEGMENT BY SEGMENT (multi-pass) using the curated pool
+     — includes a "cutting room floor" segment for the runners-up
+  6. Extract a structured recap of today's episode for future de-dup
+  7. Run OpenAI TTS in chunks
+  8. Stitch segments with ffmpeg
+  9. Save the recap locally (cron uploads it to Drive afterwards)
+ 10. Print final JSON result to stdout
+
+Reads credentials from environment via the secure custom-cred proxy:
+  - Perplexity: requests go to api.perplexity.ai
+  - OpenAI:     requests go to api.openai.com
+
+Both keys are referenced ONLY through api_credentials=['custom-cred:api.perplexity.ai',
+'custom-cred:api.openai.com'] on the bash call that runs this script.
+The raw keys never appear in this file or any output.
+
+Usage:
+  python3 podcast.py                  # full daily run (~60 min episode)
+  python3 podcast.py --test           # short test run (3 segments only)
+  python3 podcast.py --skip-tts       # research + script + recap only
+  python3 podcast.py --recap-only     # regenerate today's recap from existing script.json
+"""
+
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+import datetime as dt
+try:
+    from rapidfuzz import fuzz as _rf_fuzz
+except Exception:
+    _rf_fuzz = None
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+import httpx
+
+# ─── CONFIG ──────────────────────────────────────────────────────────────────
+
+# BASE_DIR can be overridden via PODCAST_BASE_DIR (e.g. on GitHub Actions where the
+# repo is checked out into a runner workdir). Defaults to the directory holding this
+# file so a fresh `python3 podcast.py` works from any clone.
+BASE_DIR = Path(os.environ.get("PODCAST_BASE_DIR", str(Path(__file__).resolve().parent)))
+EPISODES_DIR = BASE_DIR / "episodes"
+RECAPS_DIR = BASE_DIR / "recaps"
+
+# API keys: in Computer they were injected by a proxy, so any Bearer string worked.
+# Outside Computer (GitHub Actions, local), real keys must come from env vars.
+PPLX_API_KEY = os.environ.get("PERPLEXITY_API_KEY", "__INJECTED__")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "__INJECTED__")
+EPISODES_DIR.mkdir(parents=True, exist_ok=True)
+RECAPS_DIR.mkdir(parents=True, exist_ok=True)
+
+PPLX_URL = "https://api.perplexity.ai/chat/completions"
+OPENAI_TTS_URL = "https://api.openai.com/v1/audio/speech"
+
+RESEARCH_MODEL = "sonar-pro"           # has live web search
+CURATOR_MODEL = "sonar-pro"            # ranks & balances the topic pool
+SCRIPT_MODEL = "sonar-pro"             # writer
+RECAP_MODEL = "sonar"                  # cheapest tier — extraction task, no search needed
+
+TTS_MODEL = "gpt-4o-mini-tts"
+HOST_A_VOICE = "nova"                  # Maya — analytical
+HOST_B_VOICE = "onyx"                  # Ben — skeptical/witty
+
+WATCHLIST = ["NVDA", "MSFT", "GOOGL", "META", "AMZN", "AAPL", "TSLA", "PLTR", "COIN", "HOOD"]
+CRYPTO = ["BTC", "ETH", "SOL"]
+
+# How many days of recap memory to feed back to the writer
+RECAP_LOOKBACK_DAYS = 7
+
+# OpenAI TTS limit: 4096 chars per call. Keep chunks well under.
+TTS_CHUNK_CHAR_BUDGET = 3500
+
+# ─── SEGMENT PLAN ────────────────────────────────────────────────────────────
+# Each segment gets its own LLM call with a focused word target.
+# This is the key to hitting ~60 min reliably (vs. ~14 min in single-pass).
+
+# Segments map to CONTENT TYPES, not raw research beats. The curator (next stage)
+# picks which specific stories land in each segment.
+SEGMENTS_FULL: list[dict[str, Any]] = [
+    {"key": "cold_open",     "label": "Cold open",                                "words": 180},
+    {"key": "world",         "label": "World & geopolitics",                     "words": 1100},
+    {"key": "economy",       "label": "Economy & markets",                       "words": 900},
+    {"key": "science",       "label": "Science, biotech & wild studies",         "words": 1100},
+    {"key": "tech_business", "label": "Tech & business",                         "words": 1700},
+    {"key": "arguments",     "label": "Arguments worth knowing about",           "words": 3000},
+    {"key": "culture",       "label": "Culture: what everyone is talking about", "words": 1300},
+    {"key": "sports",        "label": "Sports",                                  "words": 1100},
+    {"key": "cutting_floor", "label": "From the cutting room floor",             "words": 600},
+    {"key": "signoff",       "label": "Sign-off",                                "words": 150},
+]
+
+# Subset for --test mode (~5 min episode)
+SEGMENTS_TEST: list[dict[str, Any]] = [
+    {"key": "cold_open", "label": "Cold open", "words": 100},
+    {"key": "arguments", "label": "Arguments worth knowing about", "words": 500},
+    {"key": "signoff", "label": "Sign-off", "words": 100},
+]
+
+# ─── RESEARCH BEATS ──────────────────────────────────────────────────────────
+
+# Wide-net research: 15 beats across all domains. Goal: produce far MORE topic
+# candidates than will fit in the show. The curator (next stage) ranks & cuts.
+# Each beat returns a JSON array of topic objects so the curator can rank them.
+
+BEAT_OUTPUT_INSTRUCTION = """Return ONLY a JSON array. No prose, no markdown, no code fences.
+
+CRITICAL TIME ANCHORING: Today's date is provided to you. Search the live web for current items.
+For each item, return a `published` ISO date matching the source's actual publish date.
+PREFER items from the last 48-72 hours, but DO accept items up to 14 days old if they are still
+the most important story in their domain (better a true 5-day-old story than a fabricated fresh one).
+Mark older items honestly with their real date. Never invent dates. If you genuinely cannot find any
+items in the requested window for a beat, return fewer items rather than padding with stale ones.
+
+Each element MUST be an object with these exact keys:
+  "headline":   short factual claim (one sentence)
+  "detail":     2-4 sentence summary with the actual substance, numbers, names
+  "angle":      why this is genuinely interesting or perspective-shifting (one sentence)
+  "source":     publication / podcast / Substack / handle name
+  "url":        REAL working URL to the actual article/thread/episode. REQUIRED.
+                If you do not have a verifiable URL, OMIT the item entirely. Do not invent URLs.
+  "published":  ISO date YYYY-MM-DD when the source was published. REQUIRED.
+                Must be within the last 7 days (last 48 hours strongly preferred).
+                If you do not know the publish date, OMIT the item.
+  "buzz":       short phrase on where this is getting traction
+                (e.g. "viral X thread, 12k retweets", "top of r/slatestarcodex",
+                "front page Hacker News", "trending in tech Twitter"). REQUIRED.
+Return 6-10 items. Quality and specificity over quantity. Recency and verifiability are MANDATORY.
+DO NOT include anything outside the JSON array."""
+
+BEATS: list[tuple[str, str]] = [
+    ("geopolitics", f"""Major world & geopolitical stories from the LAST 24-48 HOURS.
+Cover wars (Russia/Ukraine, Middle East, any escalations), US/China dynamics, elections in major democracies,
+notable diplomatic moves, sanctions, summits, treaties, coups, protests, refugee crises. Skip routine politicking.
+Focus on stories where something MATERIAL changed or was revealed. Prefer reporting from Reuters, AP, FT, NYT,
+WaPo, Bloomberg, The Economist, BBC. Real URLs published in the last 48 hours.
+Return 8-12 items.
+{BEAT_OUTPUT_INSTRUCTION}"""),
+
+    ("economics", f"""Real economy stories from the LAST 48 HOURS: macro data releases (CPI, jobs, GDP, PCE),
+central bank moves, energy prices, trade flows, currency moves, debt markets, commodity moves, housing data,
+signs of stress or strength. Include one or two non-obvious indicators (shipping rates, credit spreads, etc.).
+Sources: Bloomberg, FT, WSJ, Reuters, CNBC, central bank releases. Real URLs in the last 48 hours.
+Return 8-10 items.
+{BEAT_OUTPUT_INSTRUCTION}"""),
+
+    ("science", f"""Genuinely interesting science news / preprints / Nature & Science papers from the LAST 7 DAYS.
+Physics, chemistry, astronomy, neuroscience, ecology, materials, climate. Prefer counterintuitive findings,
+results that change a textbook, or unexpected applications. Skip incremental papers.
+Sources: Nature, Science, Quanta Magazine, Ars Technica science desk, Phys.org, MIT Technology Review,
+university press rooms, ScienceDaily, New Scientist. Return 8-10 items.
+{BEAT_OUTPUT_INSTRUCTION}"""),
+
+    ("biotech", f"""Biotech, medicine, longevity & wild biology stories from the LAST 7 DAYS.
+Clinical trial readouts, FDA actions, novel mechanisms, longevity & aging research, neuroscience,
+weird biology (microbiome, fungi, gene editing surprises). Skip pharma earnings.
+Sources: STAT News, Endpoints, BioPharma Dive, Nature Medicine, Science Translational Medicine.
+Return 6-10 items.
+{BEAT_OUTPUT_INSTRUCTION}"""),
+
+    ("crazy_studies", f"""The most surprising / counterintuitive academic studies published in the LAST 14 DAYS
+that are getting actual social media or press attention. Psychology, behavioral econ, sociology, public health,
+epidemiology, history-as-data, economics. Things that would make a thoughtful listener go "huh, really?" —
+real findings, not pop-science clickbait. Must include study authors, institution, journal name, AND a URL
+to the paper or a credible writeup. Prefer studies getting traction on academic X, r/science, or in newsletters.
+Return 6-10 items.
+{BEAT_OUTPUT_INSTRUCTION}"""),
+
+    ("tech_news", f"""Tech industry news from the LAST 48 HOURS — broader than just AI.
+Cover: big tech moves (Apple/MS/Google/Meta/Amazon/Nvidia), product launches, antitrust, regulation,
+hardware/robotics, semiconductors, fintech, climate tech, defense tech, consumer tech, gaming,
+crypto, dev tools. EXCLUDE: enterprise B2B SaaS earnings filler, ETL/data-engineering, vendor PR.
+Sources: The Information, Bloomberg, FT, Stratechery, TechCrunch (selectively), Reuters tech, Axios Pro,
+The Verge, Ars Technica, Wired, 9to5Mac. Return 10-14 items.
+{BEAT_OUTPUT_INSTRUCTION}"""),
+
+    ("ai_frontier", f"""Frontier AI news & analysis from the LAST 7 DAYS — model releases, lab news,
+research papers, safety/regulation, infra/chips, AI agents, robotics, breakthrough demos.
+Sources: Stratechery, Import AI (Jack Clark), Last Week in AI, The Algorithm (MIT Tech Review),
+Interconnects (Nathan Lambert), The Rundown AI, AI Realist, Latent Space (swyx), Hard Fork pod,
+Dwarkesh Patel pod, plus primary lab announcements (OpenAI, Anthropic, DeepMind, xAI, Mistral, DeepSeek, Meta AI).
+Return 10-14 items. Mix product news, research, and industry analysis.
+{BEAT_OUTPUT_INSTRUCTION}"""),
+
+    ("startups_funding", f"""Notable startup fundraises, IPO filings, M&A, founder moves from the LAST 7 DAYS.
+Bias: consumer AI, AI agents, dev tools, robotics, biotech, defense, fintech, climate, hardware, gaming.
+Must include company + amount + lead investor when relevant. Sources: The Information, PitchBook,
+TechCrunch funding, Axios Pro Rata, Crunchbase News, Strictly VC. Return 8-12 items.
+{BEAT_OUTPUT_INSTRUCTION}"""),
+
+    ("twitter", f"""Viral threads / debates / arguments on X (Twitter) RIGHT NOW (LAST 48 HOURS),
+across politics, tech, AI, economics, science, culture, sports — any domain.
+For each: WHO started it (handle), the core claim, why it's getting traction (RT/like counts),
+and the counter-take if there is one. Prefer threads that are perspective-shifting, contrarian, or capture
+a real shift in how people are thinking. URL must link directly to the originating tweet/thread.
+Return 8-12 items spanning multiple topic areas.
+{BEAT_OUTPUT_INSTRUCTION}"""),
+
+    ("reddit", f"""High-engagement Reddit threads from the LAST 48 HOURS across
+r/slatestarcodex, r/MachineLearning, r/AskHistorians, r/changemyview, r/TrueReddit, r/AskScience,
+r/Economics, r/Philosophy, r/AskAcademia, r/neoliberal, r/movies, r/television, r/books, r/nba, r/soccer,
+r/nfl, r/baseball, r/Cricket, r/Formula1, r/tennis, r/Olympics.
+For each: subreddit, the question or claim, why the discussion is interesting, the top-voted insight,
+upvote count if known. URL must link to the actual Reddit thread. Return 8-12 items.
+{BEAT_OUTPUT_INSTRUCTION}"""),
+
+    ("substack", f"""Most interesting Substack essays / newsletter posts published in the LAST 7 DAYS that are
+actively circulating (X shares, HN front page, group-chat traction). Writers worth checking:
+Noah Smith, Matt Yglesias, Tyler Cowen / Marginal Revolution, Ben Thompson / Stratechery,
+Byrne Hobart / The Diff, Patrick McKenzie / Bits about Money, Scott Alexander / Astral Codex Ten,
+Erik Hoel, Dan Wang, Anton Howes, Not Boring, One Useful Thing, Slow Boring, Construction Physics,
+Works in Progress, The Pull Request, Money Stuff (Matt Levine), The Rundown AI, AI Realist,
+Import AI, Last Week in AI, Latent Space, Interconnects. Plus Hacker News top long-reads.
+For each: title, author, core argument, why it is circulating, working URL.
+SKIP essays you cannot link to. SKIP obscure writers with no public traction signal.
+Return 8-12 items.
+{BEAT_OUTPUT_INSTRUCTION}"""),
+
+    ("podcasts", f"""Most interesting conversations on podcasts that aired in the LAST 7 DAYS and are
+being actively discussed. Look at: Dwarkesh Patel, Conversations with Tyler, Ezra Klein, Lex Fridman,
+Hard Fork, Pivot, Acquired, Lenny's Podcast, All-In, BG2, Sharp Tech, Decoder, Plain English, The Daily,
+Honestly with Bari Weiss, The Rest is History, Hardcore History, 80,000 Hours, Sean Carroll's Mindscape,
+Huberman Lab, Founders, Invest Like the Best, The Town, ChinaTalk, Odd Lots, Bg2 Pod, No Priors,
+Latent Space, The TWIML AI Podcast, Practical AI.
+For each: podcast name + episode title, guest, the most interesting idea, why it is worth knowing.
+URL to the actual episode. Return 8-12 items.
+{BEAT_OUTPUT_INSTRUCTION}"""),
+
+    ("culture_buzz", f"""What is EVERYONE actually watching, reading, listening to, or arguing about RIGHT NOW
+(THE LAST 7 DAYS — TODAY IS 2026 — do NOT return items from 2023 or 2024)? Dinner-party / group-chat beat. Cover:
+- TV: shows people are texting about (HBO, Netflix, Apple TV, FX, Hulu, Peacock, Disney+ — new releases, finales)
+- Film: theatrical openings, streaming drops with buzz, viral box office stories, Letterboxd top weekly
+- Music: charting albums, viral songs (TikTok-driven hits), tour announcements, artist beefs
+- Books: NYT bestseller movements, BookTok hits, major releases, viral essays / memoirs
+- Internet culture: a meme that broke through, a celebrity moment, a viral video everyone has seen
+- Live events: notable concerts, festivals, awards shows, viral moments
+Sources: Vulture, The Ringer, Variety, Hollywood Reporter, Letterboxd, Billboard, Pitchfork, NYT Books,
+Vanity Fair, Defector, IndieWire, /r/movies, /r/television, /r/popheads hot threads.
+For each: title/artist/show, format, why it is the moment, critical or social signal, URL.
+Recency and broad relevance matter MORE than highbrow taste. SKIP obscure prestige stuff nobody is discussing.
+Return 10-14 items.
+{BEAT_OUTPUT_INSTRUCTION}"""),
+
+    ("sports", f"""Comprehensive sports coverage from the LAST 48 HOURS — the major story in EVERY active
+league or tournament. Be exhaustive across all of these (skip only the ones with literally no news today):
+- NBA (Finals, playoffs, draft, trades, free agency)
+- NFL (offseason moves, contracts, draft, training camp, suspensions)
+- MLB (standings, no-hitters, trades, contract news)
+- NHL (Stanley Cup, free agency, blockbuster trades)
+- Soccer — Premier League, La Liga, Bundesliga, Serie A, Champions League/Europa League, MLS, transfer window
+- INTERNATIONAL SOCCER tournaments — always check FIFA World Cup, Euros, Copa America, AFCON, Asian Cup,
+  Nations League, Olympics soccer if any are active or in qualifying. Report group stage results, knockout
+  fixtures, upset wins, breakout players. These tournaments are MUST-CHECK every run.
+- F1 (race weekends, driver moves, championship standings)
+- Tennis (Grand Slams — always check if Australian Open, French Open, Wimbledon, US Open is active; major upsets)
+- Cricket (T20 World Cup, IPL, Test series, ODI tournaments)
+- Golf (Majors — Masters, PGA, US Open, Open Championship; Ryder Cup)
+- Boxing / MMA (UFC events, major title fights)
+- Olympics / Paralympics (if in session)
+- College sports (March Madness, College World Series, transfer portal drama, NIL stories)
+- Off-field: athlete podcasts, off-field beefs, ownership news, league business
+Sources: ESPN, The Athletic, Ringer, Defector, BBC Sport, Sky Sports, FIFA.com, sport-specific Twitter handles.
+Return 12-16 items spanning AS MANY leagues/tournaments as have real news today.
+{BEAT_OUTPUT_INSTRUCTION}"""),
+
+    ("weird_internet", f"""Weird, unexpected, genuinely interesting internet stories from the LAST 7 DAYS.
+Viral phenomena with a sharp underlying story, niche communities doing interesting things, a wild Twitter beef,
+a surprising data visualization, a forgotten website that resurfaced, a strange court case.
+Things that don't fit neatly into other beats but are worth knowing. URL and recency required.
+Return 6-10 items.
+{BEAT_OUTPUT_INSTRUCTION}"""),
+]
+
+MARKETS_PROMPT_TEMPLATE = """Current market snapshot. Give me:
+- For each stock: latest price, day change %, market cap if notable. Tickers: {tickers}
+- For each crypto: current USD price, 24h change %. Tickers: {crypto}
+- Major US indices (S&P 500, Nasdaq, Dow) latest level and day change %
+- One key macro story moving markets today (Fed, oil, inflation, geopolitics) — single sentence
+
+Format as concise structured bullets. Include the data timestamp. If markets are closed, say so."""
+
+def today_preamble(date_obj=None) -> str:
+    """Build the date/time context block prepended to every Sonar prompt.
+
+    Forces the model to anchor claims temporally and to avoid stale training data.
+    """
+    d = date_obj or dt.date.today()
+    day_name = d.strftime("%A")
+    iso = d.isoformat()
+    # Compute relative date markers the model can use in output
+    yesterday = (d - dt.timedelta(days=1)).strftime("%A %b %d")
+    last_week_start = (d - dt.timedelta(days=7)).strftime("%b %d")
+    return (
+        f"========== TIME CONTEXT — READ FIRST ==========\n"
+        f"TODAY IS {day_name}, {iso}.\n"
+        f"Yesterday was {yesterday}. The last 7 days started {last_week_start}.\n"
+        f"You MUST search the live web for current information.\n"
+        f"DO NOT use information from your training data that contradicts the live web.\n"
+        f"When you describe events, anchor them in time explicitly:\n"
+        f"  - 'on Monday', 'yesterday', 'this week', 'last Friday', 'three days ago'\n"
+        f"  - never narrate stale events as if they happened today\n"
+        f"  - if an item is more than 7 days old, say so plainly\n"
+        f"=================================================\n\n"
+    )
+
+
+# ─── PERPLEXITY API ──────────────────────────────────────────────────────────
+
+def pplx_chat(prompt: str, model: str = RESEARCH_MODEL, max_tokens: int = 2000,
+              system: str | None = None, temperature: float = 0.4,
+              retries: int = 3) -> str:
+    """Call Perplexity Chat Completions. Returns assistant message text."""
+    messages: list[dict[str, str]] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+
+    last_err: Exception | None = None
+    for attempt in range(retries):
+        try:
+            r = httpx.post(
+                PPLX_URL,
+                json=payload,
+                headers={"Authorization": f"Bearer {PPLX_API_KEY}"},
+                timeout=180,
+            )
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            last_err = e
+            print(f"[pplx_chat] attempt {attempt+1} failed: {e}", file=sys.stderr)
+            time.sleep(3 * (attempt + 1))
+    raise RuntimeError(f"pplx_chat failed: {last_err}")
+
+
+def _parse_beat_json(raw: str, label: str) -> list[dict[str, Any]]:
+    """Best-effort parse of a beat's JSON array of topic dicts.
+
+    Strips code fences, extracts the outermost [...] block, salvages partial
+    valid items if the tail is truncated.
+    """
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```\s*$", "", cleaned)
+    start, end = cleaned.find("["), cleaned.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        cleaned = cleaned[start:end + 1]
+
+    try:
+        data = json.loads(cleaned)
+        if isinstance(data, list):
+            return [d for d in data if isinstance(d, dict) and d.get("headline")]
+    except json.JSONDecodeError:
+        pass
+
+    # Salvage: extract every top-level {"headline": ...} object via brace matching
+    items: list[dict[str, Any]] = []
+    depth = 0
+    obj_start = -1
+    for i, ch in enumerate(cleaned):
+        if ch == "{":
+            if depth == 0:
+                obj_start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and obj_start != -1:
+                blob = cleaned[obj_start:i + 1]
+                try:
+                    obj = json.loads(blob)
+                    if isinstance(obj, dict) and obj.get("headline"):
+                        items.append(obj)
+                except json.JSONDecodeError:
+                    pass
+                obj_start = -1
+    if items:
+        print(f"[research] {label} salvaged {len(items)} items from broken JSON", file=sys.stderr)
+    return items
+
+
+def gather_research() -> dict[str, list[dict[str, Any]]]:
+    """Run all wide-net research beats in parallel. Each returns a list of topic dicts."""
+    results: dict[str, list[dict[str, Any]]] = {}
+    preamble = today_preamble()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+        future_map = {
+            pool.submit(pplx_chat, preamble + prompt, RESEARCH_MODEL, 4000): label
+            for label, prompt in BEATS
+        }
+        for fut in concurrent.futures.as_completed(future_map):
+            label = future_map[fut]
+            try:
+                raw = fut.result()
+                items = _parse_beat_json(raw, label)
+                # Tag every item with its source beat for downstream curation
+                for it in items:
+                    it["beat"] = label
+                results[label] = items
+                print(f"[research] {label} ✓ {len(items)} items", file=sys.stderr)
+            except Exception as e:
+                print(f"[research] {label} FAILED: {e}", file=sys.stderr)
+                results[label] = []
+    return results
+
+
+
+# ─── REAL MARKET DATA (Yahoo Finance) ────────────────────────────────────────
+# Sonar-pro hallucinates commodity prices even at temp=0 with grounding instructions.
+# We pull real prices ourselves and feed them into the script as ground truth.
+
+_YAHOO_TICKERS: list[tuple[str, str]] = [
+    # (yahoo_symbol, display_label)
+    ("^GSPC",     "S&P 500"),
+    ("^DJI",      "Dow Jones"),
+    ("^IXIC",     "Nasdaq"),
+    ("^VIX",      "VIX"),
+    ("^TNX",      "10Y Treasury yield"),
+    ("DX-Y.NYB",  "Dollar Index"),
+    ("BZ=F",      "Brent crude"),
+    ("CL=F",      "WTI crude"),
+    ("GC=F",      "Gold"),
+    ("EURUSD=X",  "EUR/USD"),
+    ("USDJPY=X",  "USD/JPY"),
+    ("BTC-USD",   "Bitcoin"),
+    ("ETH-USD",   "Ethereum"),
+    ("SOL-USD",   "Solana"),
+]
+
+# Equity watchlist gets the same Yahoo treatment (no =F suffix needed).
+_EQUITY_TICKERS = [(t, t) for t in WATCHLIST]
+
+
+# Build a single proxy-bypassing opener for Yahoo Finance.
+# The agent sandbox routes HTTPS through a credential proxy that doesn't
+# intercept Yahoo, so we must explicitly disable proxying for these calls.
+import urllib.request as _urlreq
+_YAHOO_OPENER = _urlreq.build_opener(_urlreq.ProxyHandler({}))
+
+
+def _yahoo_quote(symbol: str, timeout: float = 8.0) -> dict | None:
+    """Fetch one Yahoo quote with chart endpoint. Returns price + pct change or None."""
+    import json as _json
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=5d"
+    req = _urlreq.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with _YAHOO_OPENER.open(req, timeout=timeout) as r:
+            data = _json.loads(r.read())
+    except Exception:
+        return None
+    try:
+        meta = data["chart"]["result"][0]["meta"]
+    except Exception:
+        return None
+    price = meta.get("regularMarketPrice")
+    prev = meta.get("chartPreviousClose") or meta.get("previousClose")
+    if price is None:
+        return None
+    pct = None
+    if prev:
+        try:
+            pct = (price - prev) / prev * 100.0
+        except Exception:
+            pct = None
+    return {"symbol": symbol, "price": float(price), "prev_close": prev, "pct_change": pct}
+
+
+def fetch_yahoo_quotes() -> dict[str, dict]:
+    """Pull all watchlist + macro tickers from Yahoo Finance in a small thread pool."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    pairs = _YAHOO_TICKERS + _EQUITY_TICKERS
+    quotes: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        fut_to_label = {ex.submit(_yahoo_quote, sym): (sym, label) for sym, label in pairs}
+        for fut in as_completed(fut_to_label):
+            sym, label = fut_to_label[fut]
+            try:
+                q = fut.result()
+            except Exception:
+                q = None
+            if q:
+                q["label"] = label
+                quotes[sym] = q
+    return quotes
+
+
+def _format_quote(q: dict) -> str:
+    """One-line formatted quote for the markets block."""
+    price = q["price"]
+    pct = q.get("pct_change")
+    label = q.get("label", q.get("symbol", "?"))
+    # Choose precision: equities/futures w/ small price → 2 decimals; large indices → comma
+    if price >= 1000:
+        price_str = f"{price:,.2f}"
+    elif price >= 10:
+        price_str = f"{price:.2f}"
+    else:
+        price_str = f"{price:.4f}"
+    pct_str = f"{pct:+.2f}%" if pct is not None else "(no change data)"
+    return f"- {label}: {price_str} ({pct_str})"
+
+
+def build_real_markets_snapshot() -> str:
+    """Live Yahoo-backed market snapshot. Replaces LLM-fabricated prices.
+
+    Sonar-pro consistently invents oil and crypto prices; Yahoo is the source of truth.
+    We still call Sonar for ONE optional narrative sentence about today's market mood.
+    """
+    quotes = fetch_yahoo_quotes()
+    if not quotes:
+        # Hard fail to Sonar only if Yahoo is totally unreachable.
+        return "(live market data unavailable — Yahoo Finance unreachable)"
+
+    # Group sections for readability
+    sections: list[tuple[str, list[str]]] = []
+
+    # Indices
+    idx_keys = ["^GSPC", "^DJI", "^IXIC", "^VIX"]
+    idx_lines = [_format_quote(quotes[k]) for k in idx_keys if k in quotes]
+    if idx_lines:
+        sections.append(("US indices", idx_lines))
+
+    # Rates / FX
+    rate_keys = ["^TNX", "DX-Y.NYB", "EURUSD=X", "USDJPY=X"]
+    rate_lines = [_format_quote(quotes[k]) for k in rate_keys if k in quotes]
+    if rate_lines:
+        sections.append(("Rates & FX", rate_lines))
+
+    # Commodities
+    comm_keys = ["BZ=F", "CL=F", "GC=F"]
+    comm_lines = [_format_quote(quotes[k]) for k in comm_keys if k in quotes]
+    if comm_lines:
+        sections.append(("Commodities", comm_lines))
+
+    # Crypto
+    crypto_keys = ["BTC-USD", "ETH-USD", "SOL-USD"]
+    crypto_lines = [_format_quote(quotes[k]) for k in crypto_keys if k in quotes]
+    if crypto_lines:
+        sections.append(("Crypto", crypto_lines))
+
+    # Equities (watchlist)
+    eq_lines = [_format_quote(quotes[t]) for t in WATCHLIST if t in quotes]
+    if eq_lines:
+        sections.append(("Equity watchlist", eq_lines))
+
+    body = ""
+    for header, lines in sections:
+        body += f"\n{header}:\n" + "\n".join(lines) + "\n"
+
+    # Add today date so the writer knows these are fresh
+    timestamp = dt.date.today().isoformat()
+    header_block = (
+        f"LIVE MARKETS SNAPSHOT (Yahoo Finance, fetched {timestamp}):\n"
+        f"All prices below are REAL and CURRENT. Use these numbers verbatim. "
+        f"Do NOT substitute Sonar/training-data values for these.\n"
+    )
+
+    # Optional macro narrative from Sonar — one sentence, sandboxed
+    narrative = ""
+    try:
+        preamble = today_preamble()
+        prompt = (
+            preamble
+            + "Give me ONE short sentence (<=25 words) describing today's overall market mood.\n"
+            + "Examples: 'Tech rallied on Nvidia earnings while bonds sold off.'\n"
+            + "Do NOT cite specific numbers — those are handled separately. Just the vibe.\n"
+            + "Return only the sentence, no prefix, no quotes."
+        )
+        narrative = pplx_chat(prompt, RESEARCH_MODEL, 200, temperature=0.3).strip()
+        # Strip surrounding quotes if present
+        narrative = narrative.strip('"\'').strip()
+        if narrative:
+            narrative = f"\nMarket vibe (one-liner from Sonar):\n- {narrative}\n"
+    except Exception as e:
+        print(f"[markets] narrative call failed (non-fatal): {e}", file=sys.stderr)
+        narrative = ""
+
+    return header_block + body + narrative
+
+
+def gather_markets() -> str:
+    """Real market snapshot from Yahoo Finance. Replaces v5 LLM-based fetch.
+
+    Previous version used Sonar-pro which hallucinated commodity prices
+    (e.g. Brent at $87 when reality was $73). Yahoo Finance is the source of truth.
+    """
+    print("[markets] fetching real quotes from Yahoo Finance...", file=sys.stderr)
+    snapshot = build_real_markets_snapshot()
+    if "unreachable" in snapshot.lower():
+        print(f"[markets] WARN: Yahoo Finance unreachable, fallback to Sonar", file=sys.stderr)
+        # Fallback to the old Sonar-based fetch
+        preamble = today_preamble()
+        prompt = (
+            preamble
+            + MARKETS_PROMPT_TEMPLATE.format(
+                tickers=", ".join(WATCHLIST), crypto=", ".join(CRYPTO),
+            )
+            + "\n\nCRITICAL: For EVERY number you return, it MUST come from a source\n"
+            + "published in the last 24 hours. Cite source + time after every number.\n"
+        )
+        try:
+            return pplx_chat(prompt, RESEARCH_MODEL, 1500, temperature=0.2)
+        except Exception as e:
+            print(f"[markets] fallback also FAILED: {e}", file=sys.stderr)
+            return "(markets data unavailable today)"
+    return snapshot
+
+
+# ─── RECAP MEMORY ────────────────────────────────────────────────────────────
+
+def load_recent_recaps(lookback_days: int = RECAP_LOOKBACK_DAYS) -> list[dict[str, Any]]:
+    """Load the last N days of episode recaps from local store.
+
+    Each recap is a JSON file with keys: date, headline, topics, entities, summary.
+    Returns sorted oldest-first so the model sees chronological order.
+    """
+    today = dt.date.today()
+    recaps: list[dict[str, Any]] = []
+    for delta in range(1, lookback_days + 1):  # skip today, look back
+        d = today - dt.timedelta(days=delta)
+        path = RECAPS_DIR / f"{d.isoformat()}.json"
+        if path.exists():
+            try:
+                recaps.append(json.loads(path.read_text()))
+            except Exception as e:
+                print(f"[recap] failed to load {path.name}: {e}", file=sys.stderr)
+    recaps.sort(key=lambda r: r.get("date", ""))
+    print(f"[recap] loaded {len(recaps)} prior recap(s)", file=sys.stderr)
+    return recaps
+
+
+def format_recaps_for_writer(recaps: list[dict[str, Any]]) -> str:
+    """Render recent recaps as a compact context block for the script writer."""
+    if not recaps:
+        return "(no prior episodes — this is the first one or memory is empty)"
+
+    lines: list[str] = []
+    for r in recaps:
+        date = r.get("date", "?")
+        lines.append(f"\n--- {date} ---")
+        headline = r.get("headline")
+        if headline:
+            lines.append(f"Headline: {headline}")
+        topics = r.get("topics") or []
+        if topics:
+            lines.append("Topics covered:")
+            for t in topics:
+                lines.append(f"  - {t}")
+        entities = r.get("entities") or []
+        if entities:
+            lines.append(f"Entities mentioned: {', '.join(entities)}")
+        summary = r.get("summary")
+        if summary:
+            lines.append(f"Summary: {summary}")
+    return "\n".join(lines)
+
+
+RECAP_SYSTEM_PROMPT = """You extract structured recaps from podcast scripts for future de-duplication.
+
+Output STRICT JSON only — no prose, no code fences. Schema:
+{{
+  "headline": "<one-sentence summary of the day's most important thread>",
+  "topics": ["<5-12 short topic phrases that capture every distinct story covered, 4-10 words each>"],
+  "entities": ["<flat list of all proper nouns mentioned: people, companies, products, tickers, places>"],
+  "summary": "<2-4 sentence prose summary of the whole episode>"
+}}
+
+Be precise. Topics should be granular enough that another agent could ask 'was X covered?' and get a yes/no answer.
+Entities should be canonical names ('OpenAI' not 'open ai', 'NVDA' not 'Nvidia stock')."""
+
+
+def extract_recap(dialogue: list[dict[str, str]], date_str: str) -> dict[str, Any]:
+    """Generate a structured recap from today's full script."""
+    # Compact the dialogue into plain prose for the extraction prompt
+    transcript_parts: list[str] = []
+    for line in dialogue:
+        speaker = "Maya" if line["speaker"] == "kore" else "Ben"
+        text = re.sub(r"\[[^\]]+\]", "", line["text"]).strip()
+        if text:
+            transcript_parts.append(f"{speaker}: {text}")
+    transcript = "\n".join(transcript_parts)
+
+    # Truncate if absurdly long (Sonar context is generous but we don't need every word)
+    if len(transcript) > 60000:
+        transcript = transcript[:60000] + "\n\n[transcript truncated]"
+
+    prompt = f"Date: {date_str}\n\nTRANSCRIPT:\n{transcript}\n\nExtract the recap JSON now."
+    raw = pplx_chat(prompt, model=RECAP_MODEL, max_tokens=3500,
+                    system=RECAP_SYSTEM_PROMPT, temperature=0.1)
+
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```\s*$", "", cleaned)
+    start, end = cleaned.find("{"), cleaned.rfind("}")
+    if start != -1 and end != -1:
+        cleaned = cleaned[start:end + 1]
+
+    try:
+        recap = json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        print(f"[recap] parse failed, returning skeleton: {e}", file=sys.stderr)
+        recap = {"headline": "", "topics": [], "entities": [], "summary": "",
+                 "_parse_error": str(e), "_raw": raw[:2000]}
+
+    recap["date"] = date_str
+    return recap
+
+
+
+# CURATOR (rank -> balance -> assign segments) ------------------------------
+
+# Maps content-type segments to which raw research beats are eligible to land there.
+# v5: SEGMENT_BEAT_AFFINITY removed. The curator now routes items by CONTENT fit, not by beat tag.
+# Beats are still tagged in the candidate pool for the curator's information, but cross-beat assignment
+# is fine (e.g. a tech_news item belongs in tech_business; a podcast about geopolitics can land in
+# arguments OR world). Affinity-based reroute logic in curator was brittle and is gone.
+
+
+# Target topic count per segment. The curator tries to hit these.
+SEGMENT_TARGET_TOPICS: dict[str, int] = {
+    "world": 5,
+    "economy": 4,
+    "science": 5,
+    "tech_business": 7,       # bumped: more startups + AI + non-AI tech
+    "arguments": 8,           # centerpiece, drawing from X / Reddit / Substack / podcasts equally
+    "culture": 6,             # what everyone is talking about
+    "sports": 6,              # multi-league coverage, every active tournament gets a slot
+    "cutting_floor": 6,       # quick-hit runners-up
+}
+
+CURATOR_SYSTEM_PROMPT = """You are the EDITOR of a daily smart-but-broad podcast briefing.
+Your ONLY job is curation, ranking, and cross-domain balance. You do NOT write dialogue.
+
+THE LISTENER
+A 28-year-old product marketing professional in AI/data. Already drowning in AI news at work.
+He wants the show to be the OPPOSITE of an AI-narrow podcast: broad, perspective-shifting, dinner-party-worthy.
+He loves: viral Twitter threads with a sharp argument, Reddit discussions with real disagreement,
+Substack essays that change his mind, podcast conversations on big ideas, weird academic studies,
+geopolitics, science, biotech breakthroughs, mainstream culture everyone is talking about,
+and COMPREHENSIVE sports coverage spanning ALL major leagues and tournaments.
+He does NOT want: enterprise SaaS, ETL/data-engineering bias, OR obscure literary essays
+from outlets like NYRB / LRB / Aeon / niche academic journals.
+
+YOUR JOB
+You receive ~140 candidate topics across 15 beats. Pick the BEST ones with strict cross-domain balance
+and route them to the right segment BY CONTENT, not by which beat they came from.
+The show has these segments with target topic counts:
+{segment_targets}
+
+CONTENT ROUTING (the most important rule)
+Route topics to segments by what they ARE ABOUT, not by which beat returned them. For example:
+- A Reddit thread arguing about a soccer transfer belongs in SPORTS, not arguments.
+- A Stratechery essay about Apple's strategy belongs in TECH_BUSINESS, not arguments.
+- A Twitter thread about a new Nature paper belongs in SCIENCE, not arguments.
+- A Substack essay about geopolitics belongs in WORLD or ARGUMENTS depending on whether
+  it is the day's primary geopolitics story or a perspective piece.
+- A podcast conversation about big ideas belongs in ARGUMENTS.
+- A podcast about a specific product launch belongs in TECH_BUSINESS.
+The `beat` tag on each item is INFORMATIONAL ONLY — cross-routing is expected and encouraged.
+
+HARD RULES — non-negotiable
+- VERIFIABILITY: Every kept item must have a real working URL (`url` field non-empty). If the item
+  also has a `published` date, it must be within the last 14 days. DROP fabricated/unverifiable items.
+- NO OBSCURE OUTLETS: skip items from NYRB, LRB, Aeon, Public Humanities, niche academic journals,
+  obscure literary blogs. Mainstream-prestige is fine (Atlantic, New Yorker, Stratechery, Bloomberg,
+  FT, NYT, WaPo, Economist, Reuters, AP, BBC, Vox, Substack-with-traction, named newsletters).
+- SPORTS COVERAGE: Spread the 6 sports topics ACROSS DIFFERENT LEAGUES/TOURNAMENTS. Avoid loading
+  up on just one sport. If multiple major tournaments are active (World Cup, Olympics, Grand Slam,
+  major league finals), give each a slot. Prioritize tournaments with active competition over offseason.
+- ARGUMENTS SEGMENT: This is the HEART of the show. Pull from a MIX of: X/Twitter threads, Reddit
+  discussions, Substack essays, AND podcast conversations — all four as equal first-class sources.
+  Don't pack arguments with one source type. Prefer named threads with specific authors/handles.
+- TECH_BUSINESS: 7 topics with REAL DEPTH — mix big tech moves, startup funding announcements,
+  M&A, hardware/semis, AND 2-3 frontier AI items (model releases, lab news, research). Not just headlines.
+- DEDUPLICATE against recent recaps. The "RECENT EPISODES" block lists every topic phrase and
+  headline covered in the last 7 days. If a candidate item refers to the SAME story, person, study,
+  research finding, or company as a prior topic — even if the candidate's wording differs — DROP IT
+  unless there is a CONCRETE NEW DEVELOPMENT (new data, new actor, new ruling, new price, new fix).
+  Treat this rule with maximum strictness for the COLD OPEN: never reuse anything that appeared as a
+  topic in the past 3 days as today's cold open.
+  If you keep an item as an update, you MUST add an "update_note" field naming the specific new fact.
+  Items WITHOUT an update_note that overlap a prior recap WILL be removed by a downstream check.
+
+RANKING CRITERIA (in order)
+1. Verifiable and recent (working URL, recent date if available)
+2. Active social/cultural buzz (the `buzz` field shows real traction)
+3. Perspective-shifting / would change a smart person's mind
+4. Specific & sourced (named author, handle, study, exact number)
+5. Cross-domain balance (the show needs variety)
+6. Conversational potential
+
+OUTPUT FORMAT — STRICT JSON ONLY
+Return ONLY this JSON object, no prose, no fences:
+{{
+  "segments": {{
+    "world":         [<pick objects>],
+    "economy":       [<pick objects>],
+    "science":       [<pick objects>],
+    "tech_business": [<pick objects>],
+    "arguments":     [<pick objects>],
+    "culture":       [<pick objects>],
+    "sports":        [<pick objects>],
+    "cutting_floor": [<pick objects>]
+  }},
+  "editor_note": "<1-2 sentences on the day's overall vibe / theme>"
+}}
+
+Each pick object is SMALL — just identify the topic by its headline:
+{{
+  "headline":    "<exact headline copied verbatim from input>",
+  "rank":        <integer 1=top of segment>,
+  "update_note": "<short note ONLY if this is a meaningful update to a prior episode topic; else OMIT this key>"
+}}
+
+CRITICAL: The "headline" field must MATCH verbatim against one of the candidate headlines so we can look it up.
+DO NOT paraphrase headlines. DO NOT make up new headlines.
+"""
+
+
+def _normalize_pool(research: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Flatten beat-keyed research to a single list. Detail/angle truncated for curator efficiency."""
+    flat: list[dict[str, Any]] = []
+    for beat, items in research.items():
+        for it in items:
+            flat.append({
+                "headline": (it.get("headline") or "")[:200],
+                "detail":   (it.get("detail") or "")[:280],
+                "angle":    (it.get("angle") or "")[:160],
+                "source":   (it.get("source") or "")[:80],
+                "url":      it.get("url") or "",
+                "beat":     beat,
+            })
+    return flat
+
+
+def curate_topics(research: dict[str, list[dict[str, Any]]],
+                  recap_block: str,
+                  date_str: str) -> dict[str, Any]:
+    """Run the curator. Returns {segments: {seg_key: [topic, ...]}, editor_note: str}.
+
+    On failure, falls back to a deterministic rule-based curation so the show still ships.
+    """
+    pool = _normalize_pool(research)
+    print(f"[curator] {len(pool)} candidate topics from {len(research)} beats", file=sys.stderr)
+    if not pool:
+        return {"segments": {k: [] for k in SEGMENT_TARGET_TOPICS}, "editor_note": "(no research)"}
+
+    target_lines = "\n".join(
+        f"  - {seg}: target {n} topics"
+        for seg, n in SEGMENT_TARGET_TOPICS.items()
+    )
+    system = CURATOR_SYSTEM_PROMPT.format(segment_targets=target_lines)
+
+    user = (
+        today_preamble()
+        + f"Today's date for routing/dedupe purposes: {date_str}\n\n"
+        f"RECENT EPISODES (last {RECAP_LOOKBACK_DAYS} days) - use for de-dup / updates:\n"
+        f"{recap_block}\n\n"
+        f"CANDIDATE TOPIC POOL ({len(pool)} items):\n"
+        f"{json.dumps(pool, ensure_ascii=False)}\n\n"
+        "Curate now. Output the JSON object only."
+    )
+
+    raw = pplx_chat(user, model=CURATOR_MODEL, max_tokens=8000,
+                    system=system, temperature=0.4)
+
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```\s*$", "", cleaned)
+    s, e = cleaned.find("{"), cleaned.rfind("}")
+    if s != -1 and e != -1:
+        cleaned = cleaned[s:e + 1]
+
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError as ex:
+        print(f"[curator] JSON parse failed: {ex}. Falling back to deterministic curation.",
+              file=sys.stderr)
+        return _fallback_curate(research)
+
+    # Build headline -> full topic lookup from the original pool (with full detail intact)
+    lookup: dict[str, dict[str, Any]] = {}
+    for beat, items in research.items():
+        for it in items:
+            h = (it.get("headline") or "").strip()
+            if h:
+                lookup[h.lower()[:200]] = {**it, "beat": beat}
+
+    def hydrate(pick: dict[str, Any]) -> dict[str, Any] | None:
+        h = (pick.get("headline") or "").strip().lower()[:200]
+        if not h:
+            return None
+        # Try exact, then prefix (60 chars), then fuzzy substring
+        if h in lookup:
+            base = lookup[h]
+        else:
+            base = None
+            short = h[:60]
+            for k, v in lookup.items():
+                if k.startswith(short) or short in k:
+                    base = v
+                    break
+        if base is None:
+            return None
+        hydrated = {**base}
+        if "rank" in pick:
+            hydrated["rank"] = pick["rank"]
+        if pick.get("update_note"):
+            hydrated["update_note"] = pick["update_note"]
+        return hydrated
+
+    raw_segs = parsed.get("segments", {})
+    segs: dict[str, list[dict[str, Any]]] = {}
+    for k in SEGMENT_TARGET_TOPICS:
+        picks = raw_segs.get(k, [])
+        hydrated_list: list[dict[str, Any]] = []
+        for p in picks:
+            h = hydrate(p)
+            if h:
+                hydrated_list.append(h)
+            else:
+                print(f"[curator] warning: {k} pick '{(p.get('headline') or '')[:60]}' did not match pool",
+                      file=sys.stderr)
+        segs[k] = hydrated_list
+
+    # Soft cap: tech_business <= 9 (target is 7, allow slight overflow before trimming)
+    if len(segs.get("tech_business", [])) > 9:
+        segs["tech_business"] = segs["tech_business"][:9]
+        print("[curator] enforced tech_business soft cap (trimmed to 9)", file=sys.stderr)
+
+    # URL verification — the ONLY hard filter. Date is preferred but not required.
+    import datetime as _dt
+    today = _dt.date.today()
+    max_age = _dt.timedelta(days=14)
+    for k in list(segs.keys()):
+        kept = []
+        dropped = 0
+        for it in segs[k]:
+            url = (it.get("url") or "").strip()
+            pub = (it.get("published") or "").strip()
+            if not url.startswith("http"):
+                dropped += 1
+                continue
+            # If date is present, it must be within max_age. If absent, trust the URL.
+            if pub:
+                try:
+                    d = _dt.date.fromisoformat(pub[:10])
+                    if today - d > max_age:
+                        dropped += 1
+                        continue
+                except Exception:
+                    pass  # unparseable date — keep on URL strength
+            kept.append(it)
+        if dropped:
+            print(f"[curator] {k} dropped {dropped} item(s) for missing URL or stale date",
+                  file=sys.stderr)
+        segs[k] = kept
+
+    total = sum(len(v) for v in segs.values())
+    print(f"[curator] curated {total} topics across {len(segs)} segments", file=sys.stderr)
+    for k, v in segs.items():
+        print(f"[curator]   {k}: {len(v)} topics", file=sys.stderr)
+    return {"segments": segs, "editor_note": parsed.get("editor_note", "")}
+
+
+# v5 fallback uses content-keyword heuristics since affinity mapping is gone.
+_FALLBACK_SEGMENT_KEYWORDS: dict[str, list[str]] = {
+    "world":         ["geopolitics", "war", "election", "diplomatic", "russia", "ukraine", "china",
+                      "israel", "iran", "summit", "sanctions", "nato", "treaty"],
+    "economy":       ["inflation", "gdp", "fed", "central bank", "jobs", "unemployment", "cpi",
+                      "rates", "yields", "treasury", "currency", "trade", "tariff", "oil", "energy"],
+    "science":       ["study", "researchers", "paper", "nature", "science", "physics", "neuroscience",
+                      "climate", "astronomy", "discovery", "experiment", "biotech", "clinical", "fda"],
+    "tech_business": ["apple", "google", "microsoft", "meta", "amazon", "nvidia", "openai", "anthropic",
+                      "deepmind", "xai", "ai", "model", "chip", "semiconductor", "startup", "funding",
+                      "raises", "series", "ipo", "acquires", "merger", "antitrust"],
+    "arguments":     ["argues", "essay", "thread", "discusses", "debate", "podcast", "interviews",
+                      "conversation", "critique", "case for", "case against"],
+    "culture":       ["movie", "film", "tv", "series", "season", "album", "song", "book", "tiktok",
+                      "viral", "netflix", "hbo", "billboard", "bestseller", "memoir"],
+    "sports":        ["nba", "nfl", "mlb", "nhl", "soccer", "football", "world cup", "euros", "champions",
+                      "tennis", "wimbledon", "grand slam", "f1", "ferrari", "olympics", "cricket", "golf",
+                      "trade", "draft", "signed", "free agent"],
+}
+
+def _fallback_curate(research: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    """Deterministic curation if the LLM curator fails.
+
+    Routes each item by simple keyword match on headline+detail. Best-effort only —
+    designed to avoid total failure, not be smart.
+    """
+    segs: dict[str, list[dict[str, Any]]] = {k: [] for k in SEGMENT_TARGET_TOPICS}
+    used: set[str] = set()
+
+    # Flatten all items with beat tag
+    all_items: list[dict[str, Any]] = []
+    for beat, items in research.items():
+        for it in items:
+            all_items.append({**it, "beat": beat})
+
+    # Score each item against each segment by keyword overlap
+    for it in all_items:
+        h = (it.get("headline","") + " " + it.get("detail","")).lower()
+        best_seg = None
+        best_score = 0
+        for seg_key, kws in _FALLBACK_SEGMENT_KEYWORDS.items():
+            score = sum(1 for kw in kws if kw in h)
+            if score > best_score:
+                best_score = score
+                best_seg = seg_key
+        if best_seg is None:
+            best_seg = "cutting_floor"
+        key = it.get("headline","")[:80]
+        if key in used:
+            continue
+        target = SEGMENT_TARGET_TOPICS.get(best_seg, 4)
+        if len(segs[best_seg]) < target:
+            used.add(key)
+            segs[best_seg].append({**it, "rank": len(segs[best_seg]) + 1})
+
+    # Fill cutting_floor with leftovers
+    leftovers = [it for it in all_items if it.get("headline","")[:80] not in used][:6]
+    for it in leftovers:
+        segs["cutting_floor"].append({**it, "rank": len(segs["cutting_floor"]) + 1})
+
+    return {"segments": segs, "editor_note": "(fallback curation - LLM curator failed)"}
+
+
+# ─── PROGRAMMATIC DEDUPE (post-curator hard check) ───────────────────────────
+
+def _norm_text(s: str) -> str:
+    return re.sub(r"[^a-z0-9 ]+", " ", (s or "").lower()).strip()
+
+
+# Common country / region / agency tokens that overlap across unrelated stories.
+# Dedupe must NOT treat shared country names as evidence of duplicate content.
+_DEDUPE_STOP_ENTITIES = {
+    "china", "chinese", "u.s.", "us", "united", "states", "america", "american",
+    "russia", "russian", "iran", "iranian", "israel", "israeli", "european",
+    "europe", "uk", "u.k.", "britain", "british", "india", "indian", "germany",
+    "german", "france", "french", "japan", "japanese", "korea", "korean",
+    "ukraine", "ukrainian", "gaza", "lebanon", "fed", "ecb", "imf", "un",
+    "nato", "eu", "g7", "opec", "washington", "beijing", "moscow", "kyiv",
+    "tehran", "brussels", "paris", "london", "tokyo", "the", "this",
+    "today", "yesterday", "monday", "tuesday", "wednesday", "thursday",
+    "friday", "saturday", "sunday", "january", "february", "march", "april",
+    "may", "june", "july", "august", "september", "october", "november", "december",
+}
+
+
+def _entity_set(text: str) -> set[str]:
+    """Cheap entity proxy: capitalized words and quoted tokens — minus generic geo/time tokens
+    that would create spurious overlap between unrelated stories."""
+    if not text:
+        return set()
+    toks = re.findall(r"\b[A-Z][A-Za-z0-9'.-]{2,}\b", text)
+    return {t.lower() for t in toks if t.lower() not in _DEDUPE_STOP_ENTITIES}
+
+
+def _similarity(a: str, b: str) -> float:
+    """0..1 similarity between two strings using rapidfuzz when available,
+    else a cheap token-overlap fallback."""
+    a, b = _norm_text(a), _norm_text(b)
+    if not a or not b:
+        return 0.0
+    if _rf_fuzz is not None:
+        return max(_rf_fuzz.token_set_ratio(a, b), _rf_fuzz.partial_ratio(a, b)) / 100.0
+    ta, tb = set(a.split()), set(b.split())
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / max(len(ta | tb), 1)
+
+
+def programmatic_dedupe(curated: dict[str, Any],
+                        recaps: list[dict[str, Any]],
+                        date_str: str,
+                        sim_threshold: float = 0.55,
+                        entity_threshold: float = 0.5,
+                        cold_open_strict_days: int = 3) -> dict[str, Any]:
+    """Hard, deterministic dedupe against the last N days of recaps.
+
+    Drops items that overlap a prior topic UNLESS they carry an `update_note`.
+    For cold_open we use a stricter threshold and a shorter recency window —
+    cold open repeats are the most visible failure mode.
+    """
+    if not recaps:
+        return curated
+
+    today_obj = dt.date.fromisoformat(date_str)
+
+    # Build prior-topic index with per-item recency
+    prior_topics: list[tuple[str, set[str], int]] = []  # (text, entities, days_ago)
+    for r in recaps:
+        try:
+            r_date = dt.date.fromisoformat(r.get("date", ""))
+            days_ago = (today_obj - r_date).days
+        except Exception:
+            days_ago = 99
+        if r.get("headline"):
+            prior_topics.append((r["headline"], _entity_set(r["headline"]), days_ago))
+        for t in r.get("topics", []) or []:
+            prior_topics.append((t, _entity_set(t), days_ago))
+
+    segments_in = curated.get("segments", {})
+    segments_out: dict[str, list[dict[str, Any]]] = {}
+    dropped_log: list[str] = []
+
+    for seg_name, items in segments_in.items():
+        keepers: list[dict[str, Any]] = []
+        is_cold = seg_name == "cold_open"
+        for it in (items or []):
+            headline = it.get("headline", "")
+            update_note = (it.get("update_note") or "").strip()
+            item_ents = _entity_set(headline)
+            worst_match = None
+            for prior_text, prior_ents, days_ago in prior_topics:
+                if is_cold and days_ago > cold_open_strict_days:
+                    continue
+                sim = _similarity(headline, prior_text)
+                ent_overlap = (
+                    len(item_ents & prior_ents) / max(len(item_ents | prior_ents), 1)
+                    if (item_ents or prior_ents) else 0.0
+                )
+                # Require BOTH headline similarity AND entity overlap to avoid
+                # false positives where two unrelated stories share a country name.
+                # Cold open uses lower thresholds because repeats there are highly visible.
+                if is_cold:
+                    hit = (sim >= 0.45 and ent_overlap >= 0.30) or sim >= 0.70
+                else:
+                    hit = (sim >= sim_threshold and ent_overlap >= entity_threshold) or sim >= 0.80
+                if hit:
+                    if (worst_match is None) or sim > worst_match[1]:
+                        worst_match = (prior_text, sim, days_ago, ent_overlap)
+            if worst_match and not update_note:
+                pt, sim, days_ago, eo = worst_match
+                dropped_log.append(
+                    f"  [dropped {seg_name}] '{headline[:80]}' "
+                    f"~ '{pt[:60]}' (sim={sim:.2f} ent={eo:.2f} {days_ago}d ago)"
+                )
+                continue
+            if is_cold and worst_match and update_note:
+                # cold open even with update_note: kick to cutting_floor as safety
+                pt, sim, days_ago, eo = worst_match
+                dropped_log.append(
+                    f"  [demoted cold_open→cutting_floor] '{headline[:80]}' "
+                    f"~ '{pt[:60]}' sim={sim:.2f} {days_ago}d ago"
+                )
+                segments_out.setdefault("cutting_floor", []).append(it)
+                continue
+            keepers.append(it)
+        segments_out[seg_name] = keepers
+
+    if dropped_log:
+        print(f"[hard-dedupe] dropped/demoted {len(dropped_log)} items:", file=sys.stderr)
+        for line in dropped_log:
+            print(line, file=sys.stderr)
+    else:
+        print("[hard-dedupe] no overlaps found", file=sys.stderr)
+
+    # Cold-open rescue: if dedupe emptied cold_open, promote the highest-ranked
+    # un-deduped item from a content segment so the writer has something fresh.
+    if not segments_out.get("cold_open"):
+        for donor in ("science", "tech_business", "world", "arguments", "culture"):
+            picks = segments_out.get(donor) or []
+            if picks:
+                lifted = dict(picks[0])
+                lifted["lifted_from"] = donor
+                segments_out["cold_open"] = [lifted]
+                print(f"[hard-dedupe] cold_open empty after dedupe — "
+                      f"promoted top {donor} item: '{lifted.get('headline','')[:80]}'",
+                      file=sys.stderr)
+                break
+
+    curated["segments"] = segments_out
+    return curated
+
+
+# ─── SCRIPT NUMERIC FACT-CHECK ───────────────────────────────────────────────
+
+_NUM_CLAIM_PATTERNS = [
+    # $X.XX, $X billion, $X trillion, etc.
+    r"\$\d{1,4}(?:[,.]\d+)*\s*(?:billion|trillion|million|m|bn|b|t|k|per barrel|/bbl)?",
+    # X.X%   X percent
+    r"\d{1,4}(?:\.\d+)?\s*(?:%|percent)",
+    # plain price-like with unit: "87 a barrel", "142 per share"
+    r"\d{1,4}(?:\.\d+)?\s+(?:a\s+)?(?:barrel|per barrel|per share|cents|bps|basis points)",
+    # Sports scorelines: "3-0", "2-1", "108-102" — surfaces both sides of the dash
+    # Bound with word boundaries so we don't match things like "2026-06-25" dates.
+    # Negative lookbehind/lookahead for digits/dashes avoids ISO dates like 2026-06-25
+    r"(?<![\d-])\d{1,3}\u2011\d{1,3}(?![\d-])",   # unicode non-breaking hyphen
+    r"(?<![\d-])\d{1,3}-\d{1,3}(?![\d-])",         # ascii hyphen
+    # Counts with explicit "X people / X dead / X killed / X injured / X arrested"
+    r"\b\d{1,3}(?:,\d{3})*\s+(?:people|dead|killed|injured|wounded|arrested|deaths|casualties)\b",
+    # Ages and tenure: "42-year-old", "served 18 years"
+    r"\b\d{1,3}-year-old\b",
+]
+
+
+# Segments where the writer is fed ground-truth Yahoo Finance prices.
+# We DO NOT fact-check these — the LLM verifier hallucinates stale prices
+# and would overwrite real data with its own bad guesses.
+_FACT_CHECK_SKIP_SEGMENTS = {"economy"}
+
+
+def _extract_numeric_claims(lines: list[dict[str, str]]) -> list[tuple[int, str, str]]:
+    """Return (line_idx, full_sentence, matched_token) for every numeric claim.
+
+    Skips segments whose numbers come from ground-truth feeds (Yahoo Finance).
+    """
+    out: list[tuple[int, str, str]] = []
+    pattern = re.compile("|".join(_NUM_CLAIM_PATTERNS), re.IGNORECASE)
+    for i, ln in enumerate(lines):
+        if ln.get("segment") in _FACT_CHECK_SKIP_SEGMENTS:
+            continue
+        text = ln.get("text", "")
+        for m in pattern.finditer(text):
+            tok = m.group(0)
+            # Carve out the surrounding sentence for context
+            start = max(0, text.rfind(".", 0, m.start()) + 1)
+            end = text.find(".", m.end())
+            sent = text[start: end if end != -1 else len(text)].strip()
+            out.append((i, sent, tok))
+    return out
+
+
+def fact_check_script(lines: list[dict[str, str]],
+                      date_str: str,
+                      max_claims: int = 25) -> tuple[list[dict[str, str]], list[str]]:
+    """Extract numeric claims, send a batch to Sonar for verification, rewrite stale claims.
+
+    Returns (updated_lines, log_messages). Best-effort: failures are non-fatal.
+    """
+    claims = _extract_numeric_claims(lines)
+    if not claims:
+        return lines, ["[fact-check] no numeric claims found"]
+    # Cap to avoid token blowups; prioritize claims that look like prices/percentages
+    claims = claims[:max_claims]
+    numbered = "\n".join(
+        f"{i+1}. \"{sent}\" (token: {tok})"
+        for i, (_, sent, tok) in enumerate(claims)
+    )
+    preamble = today_preamble(dt.date.fromisoformat(date_str))
+    prompt = (
+        preamble
+        + "I'm fact-checking numeric claims in a podcast script before publication.\n"
+        + "Claims include prices, percentages, sports scorelines, casualty counts, ages, and similar facts.\n"
+        + "For each numbered claim below, VERIFY against the live web RIGHT NOW.\n"
+        + "Return STRICT JSON: a list of objects with keys:\n"
+        + '  {"id": <number>, "status": "VERIFIED"|"STALE"|"UNVERIFIABLE", "correct_value": "<short replacement phrase if STALE>", "note": "<one short sentence>"}\n'
+        + "STALE means the number is materially wrong:\n"
+        + "  - For prices/percentages: off by >=10%\n"
+        + "  - For sports scorelines: ANY digit differs from the real final score\n"
+        + "  - For casualty counts / ages: off by more than ~20% or by a clearly wrong category\n"
+        + "VERIFIED means the number matches the current real-world value within tolerance.\n"
+        + "UNVERIFIABLE means you cannot find a current source. If unsure, choose UNVERIFIABLE — never invent.\n"
+        + "For sports scores, when STALE, correct_value MUST be the actual final score in the same X-Y format.\n\n"
+        + "CLAIMS:\n" + numbered + "\n\nReturn only the JSON array."
+    )
+    log: list[str] = []
+    try:
+        raw = pplx_chat(prompt, RESEARCH_MODEL, 3000, temperature=0.0)
+    except Exception as e:
+        log.append(f"[fact-check] verification call FAILED: {e}")
+        return lines, log
+
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```\s*$", "", cleaned)
+    start, end = cleaned.find("["), cleaned.rfind("]")
+    verdicts: list[dict] = []
+    if start != -1 and end != -1:
+        try:
+            verdicts = json.loads(cleaned[start:end + 1])
+        except json.JSONDecodeError:
+            verdicts = []
+    if not verdicts:
+        # Brace-walk salvage: extract every top-level {...} object as a verdict
+        depth = 0
+        obj_start = -1
+        for i, ch in enumerate(cleaned):
+            if ch == "{":
+                if depth == 0:
+                    obj_start = i
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0 and obj_start != -1:
+                    blob = cleaned[obj_start:i + 1]
+                    try:
+                        obj = json.loads(blob)
+                        if isinstance(obj, dict) and "id" in obj and "status" in obj:
+                            verdicts.append(obj)
+                    except Exception:
+                        pass
+                    obj_start = -1
+    if not verdicts:
+        log.append("[fact-check] verifier returned unparseable response — skipped")
+        return lines, log
+
+    out_lines = [dict(l) for l in lines]
+    stale_count = 0
+    for v in verdicts:
+        try:
+            idx = int(v.get("id", 0)) - 1
+            if idx < 0 or idx >= len(claims):
+                continue
+            status = (v.get("status") or "").upper()
+            if status != "STALE":
+                continue
+            line_idx, sent, tok = claims[idx]
+            correct = (v.get("correct_value") or "").strip()
+            note = (v.get("note") or "").strip()
+            if not correct:
+                # Just flag with a softening qualifier — don't invent
+                replacement = re.sub(re.escape(tok), tok + " (note: figure may be stale)",
+                                     out_lines[line_idx]["text"], count=1, flags=re.IGNORECASE)
+            else:
+                replacement = re.sub(re.escape(tok), correct,
+                                     out_lines[line_idx]["text"], count=1, flags=re.IGNORECASE)
+            out_lines[line_idx]["text"] = replacement
+            log.append(f"[fact-check] line {line_idx}: '{tok}' → '{correct or '+softened'}' ({note})")
+            stale_count += 1
+        except Exception as e:
+            log.append(f"[fact-check] verdict parse error: {e}")
+    log.append(f"[fact-check] checked {len(claims)} claims, fixed {stale_count} stale")
+    return out_lines, log
+
+
+# ─── SCRIPT GENERATION (MULTI-PASS) ──────────────────────────────────────────
+
+SCRIPT_SEGMENT_SYSTEM_PROMPT = """You are writing one segment of a daily podcast briefing.
+
+THE SHOW
+Two hosts: Maya (analytical, curious, sharp interviewer) and Ben (skeptical, witty, contrarian energy).
+Vibe: NPR's Up First meets Hard Fork meets a smart group chat. Curious, broad, occasionally funny.
+Listener: a 28-year-old product marketing professional in tech/AI. Smart, broad interests.
+
+OUTPUT FORMAT — STRICT
+Return ONLY a JSON array. No prose before or after. No code fences. No commentary.
+Each element: {{"speaker": "kore" | "charon", "text": "<line>"}}
+- "kore" = Maya. "charon" = Ben.
+- Lines: conversational, 15-60 words each, natural overlap, callbacks, mild disagreement.
+- Cite specifics: company names, numbers, headlines. No vague "experts say".
+- Do NOT include speaker name in the text field. Just the spoken line.
+- Each text field MUST be under 800 characters.
+- Avoid stage directions in brackets ([pause], [laughs], etc.) — they get spoken aloud by the TTS.
+
+RECAP MEMORY USAGE
+You will receive a "RECENT EPISODES" block. Use it as follows:
+- If a story was already covered in a recent episode AND has no real new development, SKIP IT.
+- If a story has a genuine update, reference what was said before and lead with what's new.
+  Example: "Yesterday we flagged Anthropic's federal ban as day ten. Today: Mythos six has been served."
+- Do not re-cover identical ground. The listener heard it.
+
+TIME ANCHORING — CRITICAL
+For every news event you describe, anchor it in time using natural relative phrases:
+- "On Monday", "yesterday", "this week", "Friday last week", "three days ago".
+- Do NOT narrate events as if they just happened today unless they actually did.
+- If a topic's source date is more than 3 days old, acknowledge it: "From earlier this week..."
+- If you're following up on a prior episode's coverage, say so: "We flagged this on Tuesday — here's the update."
+- Never invent dates. If timing is ambiguous, prefer vague but honest phrasing ("recently") over false precision.
+
+EDITORIAL TONE
+- No data-engineering/ETL/B2B-SaaS bias — only include if a story is top-3 in tech that day.
+- Broad, smart, occasionally funny. Not a trade publication.
+"""
+
+SCRIPT_SEGMENT_USER_TEMPLATE = """{today_preamble}
+
+Today's date: {date} ({day_name})
+
+EDITOR'S NOTE FOR TODAY
+================
+{editor_note}
+
+SEGMENT TO WRITE
+================
+Segment: {label}
+Word target: {words} words (hit within ±15%)
+This segment's purpose: {purpose}
+
+RECENT EPISODES (last {lookback} days)
+================
+{recap_block}
+
+CURATED TOPICS FOR THIS SEGMENT (these have been pre-selected and ranked by the editor; use ALL of them, don't add more)
+================
+{research_block}
+
+PREVIOUS SEGMENTS WRITTEN TODAY (for tone + callback continuity, do NOT repeat content)
+================
+{prior_segments_block}
+
+Write this segment now per the system instructions. Cover every curated topic in roughly its ranked order. Output the JSON array only."""
+
+SEGMENT_PURPOSE = {
+    "cold_open":     "Maya & Ben banter on the day's biggest or most fun story. Set tone. Tease what's coming. ONE topic, max. Use ONLY the topic in CURATED TOPICS — do NOT pull a fresh idea from the recap memory. If CURATED TOPICS is empty, use the briefest possible open ('Big day today — let's jump in.') and move on. Do NOT include an explicit 'welcome to the briefing' — the intro tag handles that.",
+    "world":         "Geopolitics & world news. Real analysis on each topic, not wire-copy summaries. Disagree where appropriate.",
+    "economy":       "Economy & markets in plain English. Pair the watchlist movers with one macro thread. Skip filler.",
+    "science":       "Science, biotech, wild studies. Translate the finding, then 'so what?'. Curiosity over hype.",
+    "tech_business": "Tech AND business with real depth — 7 topics. Mix big tech moves (Apple/MS/Google/etc), 2-3 frontier AI items (model releases, lab news), 2-3 startup fundraises / IPO / M&A, plus hardware/semis/fintech/regulation. Cite specific outlets and newsletters.",
+    "arguments":     "The ANALYTICAL HEART of the show. If a BUZZING TOPICS — DEEP MATERIAL block appears in the research, it contains the actual source text from key X posts, essays, and podcast conversations. WALK THROUGH 3-5 buzzing topics SLOWLY: name the author/handle/publication, QUOTE specific lines or stats from their actual text, then deeply analyze — what they got right, what they missed, where you push back, what context they leave out. This should feel like two smart friends spending 12-15 minutes really chewing on substantive arguments. After the buzzing topics, briefly mention any remaining curated arguments items not in the buzzing block. Avoid drive-by name-drops — depth over breadth.",
+    "culture":       "Mainstream culture buzz — what everyone is texting about. The show with the viral finale, the song you keep hearing, the book on every reading list, the meme that broke through. Talk like two friends who both saw the thing. NO obscure literary essays.",
+    "sports":        "Comprehensive multi-league coverage — 6 topics across as many active leagues/tournaments as had real news today. World Cup / Euros / Olympics / Grand Slams get priority if active. Real narratives, not box scores. Skip pre-game speculation.",
+    "cutting_floor": "Rapid-fire one-line tease of strong runners-up. Format: 'One we cut: <thing>.' Maya & Ben alternate. Keep each item to 1-2 lines max. Do NOT tease tomorrow — signoff handles that.",
+    "signoff":       "Brief wrap. Warm goodbye. Do NOT add another intro tag.",
+}
+
+# Deterministic intro lines (NOT generated each run — fixed copy for predictable transitions).
+# Inserted BEFORE the LLM-generated segment dialogue. Voiced by alternating hosts.
+# `kore` = Maya, `charon` = Ben.
+SEGMENT_INTROS: dict[str, dict[str, str]] = {
+    "world":         {"speaker": "kore",   "text": "Alright, let's start with what's happening in the world. Geopolitics first."},
+    "economy":       {"speaker": "charon", "text": "Next up, the economy. Markets, macro, the numbers worth tracking."},
+    "science":       {"speaker": "kore",   "text": "Now into science and biotech. The findings worth knowing about this week."},
+    "tech_business": {"speaker": "charon", "text": "On to tech and business. Big moves across the industry, AI included where it actually matters."},
+    "arguments":     {"speaker": "kore",   "text": "This is the part of the show we love most. The arguments worth knowing about — the threads, essays, and conversations people are actually talking about."},
+    "culture":       {"speaker": "charon", "text": "Time for culture. What everyone is watching, reading, and arguing about right now."},
+    "sports":        {"speaker": "kore",   "text": "Quick sports detour. The narratives, not the box scores."},
+    "cutting_floor": {"speaker": "charon", "text": "Before we wrap, here's what we left on the cutting room floor — quick hits we couldn't quite fit but were too good to skip."},
+    "signoff":       {"speaker": "kore",   "text": "And that's the briefing. Here's how we're closing out."},
+}
+
+
+def render_curated_topics(topics: list[dict[str, Any]]) -> str:
+    """Render the curator's picks for one segment into a writer-friendly block."""
+    if not topics:
+        return "(no curated topics for this segment - keep it brief or skip)"
+    parts: list[str] = []
+    for i, t in enumerate(topics, 1):
+        beat = t.get("beat", "")
+        src = t.get("source", "")
+        url = t.get("url", "")
+        block = [f"[{i}] ({beat}) {t.get('headline','')}"]
+        if t.get("detail"):
+            block.append(f"    Detail: {t['detail']}")
+        if t.get("angle"):
+            block.append(f"    Angle:  {t['angle']}")
+        if src or url:
+            block.append(f"    Source: {src}" + (f" - {url}" if url else ""))
+        if t.get("update_note"):
+            block.append(f"    UPDATE on prior coverage: {t['update_note']}")
+        parts.append("\n".join(block))
+    return "\n\n".join(parts)
+
+
+def build_markets_overlay(markets: str) -> str:
+    """Compact markets data to feed into the economy segment alongside curated topics."""
+    return f"LIVE MARKETS SNAPSHOT (use this for the markets sub-block):\n{markets}"
+
+
+
+def compact_prior_segments(prior: list[list[dict[str, str]]]) -> str:
+    """Compact already-written segments into a short bullet summary for context."""
+    if not prior:
+        return "(this is the first segment)"
+    lines: list[str] = []
+    for seg in prior:
+        if not seg:
+            continue
+        # Just show first and last line of each prior segment for tone continuity
+        first = seg[0]["text"][:120]
+        last = seg[-1]["text"][:120]
+        speaker_first = "Maya" if seg[0]["speaker"] == "kore" else "Ben"
+        speaker_last = "Maya" if seg[-1]["speaker"] == "kore" else "Ben"
+        lines.append(f"- Started with {speaker_first}: \"{first}...\"  Ended with {speaker_last}: \"...{last}\"")
+    return "\n".join(lines)
+
+
+def _salvage_dialogue_lines(text: str) -> list[dict[str, Any]]:
+    """Brace-walk a possibly broken JSON array to recover valid {speaker, text} objects."""
+    items: list[dict[str, Any]] = []
+    depth = 0
+    obj_start = -1
+    for i, ch in enumerate(text):
+        if ch == "{":
+            if depth == 0:
+                obj_start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and obj_start != -1:
+                blob = text[obj_start:i + 1]
+                try:
+                    obj = json.loads(blob)
+                    if (isinstance(obj, dict)
+                            and obj.get("speaker") in ("kore", "charon")
+                            and isinstance(obj.get("text"), str)):
+                        items.append(obj)
+                except json.JSONDecodeError:
+                    pass
+                obj_start = -1
+    return items
+
+
+# Segments where empty curated_topics should produce a brief honest skip line rather than
+# hallucinated content. cold_open is included so the writer can't free-style off the recap.
+CONTENT_SEGMENTS = {"cold_open", "world", "economy", "science", "tech_business", "arguments",
+                    "culture", "sports", "cutting_floor"}
+
+SKIP_LINES: dict[str, list[dict[str, str]]] = {
+    "cold_open": [
+        {"speaker": "kore",   "text": "Big day. Lots moving — let's get into it."},
+        {"speaker": "charon", "text": "We'll jump straight to the world."},
+    ],
+    "culture": [
+        {"speaker": "charon", "text": "Honestly, nothing in culture jumped out at us today that everyone is talking about. We'll skip ahead rather than force it."},
+    ],
+    "sports": [
+        {"speaker": "kore", "text": "Quiet day in sports — nothing big enough to break down. Moving on."},
+    ],
+}
+
+
+
+# ─── BUZZING TOPICS — DEEP SOURCE FETCH ──────────────────────────────────────
+# For items in the arguments segment from twitter/substack/podcasts beats, we
+# fetch the full source content (tweet text, essay body, episode summary) so
+# the writer can DEEPLY analyze rather than restate the curator's headline.
+
+import urllib.request as _urlreq_bt
+import html as _html_bt
+
+_BUZZ_OPENER = _urlreq_bt.build_opener(_urlreq_bt.ProxyHandler({}))
+_TWITTER_URL_RE = re.compile(r"https?://(?:www\.)?(?:x|twitter)\.com/([A-Za-z0-9_]+)/status/(\d+)")
+
+
+def _fetch_tweet_text(handle: str, tid: str, timeout: float = 12.0) -> dict[str, str] | None:
+    """Pull a tweet's full body via fxtwitter.com (no auth required).
+
+    Returns {author, text, url} or None on failure.
+    """
+    url = f"https://fxtwitter.com/{handle}/status/{tid}"
+    req = _urlreq_bt.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; podcast-fetcher)"})
+    try:
+        with _BUZZ_OPENER.open(req, timeout=timeout) as r:
+            page = r.read().decode("utf-8", errors="ignore")
+    except Exception as e:
+        print(f"[buzz] fxtwitter fetch failed for {handle}/{tid}: {e}", file=sys.stderr)
+        return None
+
+    def meta(prop: str) -> str | None:
+        m = re.search(rf'<meta property="{re.escape(prop)}" content="([^"]+)"', page)
+        return _html_bt.unescape(m.group(1)) if m else None
+
+    author = meta("og:title") or handle
+    text = meta("og:description") or ""
+    canonical = meta("og:url") or f"https://x.com/{handle}/status/{tid}"
+    if not text:
+        return None
+    return {"author": author, "text": text, "url": canonical}
+
+
+def _fetch_article_text(url: str, timeout: float = 15.0, max_chars: int = 6000) -> str | None:
+    """Pull a public article body. Returns plaintext snippet (paywall-aware fallback).
+
+    Uses a proxy-bypassing opener so this works under the credential proxy.
+    Best-effort: returns None if the page is paywalled, errors, or has no extractable text.
+    """
+    req = _urlreq_bt.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (compatible; podcast-fetcher)",
+        "Accept": "text/html,application/xhtml+xml",
+    })
+    try:
+        with _BUZZ_OPENER.open(req, timeout=timeout) as r:
+            page = r.read().decode("utf-8", errors="ignore")
+    except Exception as e:
+        print(f"[buzz] article fetch failed for {url}: {e}", file=sys.stderr)
+        return None
+
+    # Strip scripts and styles
+    page = re.sub(r"<script[^>]*>.*?</script>", " ", page, flags=re.S | re.I)
+    page = re.sub(r"<style[^>]*>.*?</style>", " ", page, flags=re.S | re.I)
+    # Prefer <article> body if present
+    art = re.search(r"<article[^>]*>(.*?)</article>", page, flags=re.S | re.I)
+    body = art.group(1) if art else page
+    # Strip tags
+    text = re.sub(r"<[^>]+>", " ", body)
+    text = _html_bt.unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) < 400:
+        # Probably JS-rendered or paywalled
+        return None
+    return text[:max_chars]
+
+
+def _fetch_podcast_context(headline: str, source: str, url: str | None) -> str | None:
+    """For podcast items, ask Sonar to summarize the actual idea/quote from the named episode.
+
+    The curator already gave us a headline; we want the writer to have a fuller paragraph.
+    Best-effort: 200-400 words; returns None on failure.
+    """
+    if not (source or headline):
+        return None
+    prompt = (
+        f"Find the most interesting specific idea or argument from this podcast episode:\n"
+        f"  Source: {source}\n  Headline / claim: {headline}\n"
+        f"  URL: {url or '(none)'}\n\n"
+        f"Return ONE paragraph (150-250 words) describing the actual argument made on the "
+        f"episode, including who said it, what they argued, and any specific examples or "
+        f"numbers they cited. If you cannot find the episode, return 'UNKNOWN' exactly."
+    )
+    try:
+        out = pplx_chat(prompt, RESEARCH_MODEL, 700, temperature=0.2).strip()
+    except Exception as e:
+        print(f"[buzz] podcast context fetch failed: {e}", file=sys.stderr)
+        return None
+    if not out or out.strip().upper().startswith("UNKNOWN"):
+        return None
+    return out[:2000]
+
+def _fetch_essay_context(headline: str, source: str, url: str | None) -> str | None:
+    """Sonar-based fallback for essays/op-eds when direct HTTP fetch fails (404, paywall).
+
+    Asks Sonar to find the actual argument and quote a few key passages from the named
+    author/publication on this topic. Returns 200-300 word paragraph or None.
+    """
+    if not (source or headline):
+        return None
+    prompt = (
+        f"{today_preamble()}\n"
+        f"Find the strongest specific argument from this recent essay or op-ed:\n"
+        f"  Publication / author: {source}\n  Claim: {headline}\n"
+        f"  Hinted URL (may be wrong): {url or '(none)'}\n\n"
+        f"Return ONE paragraph (200-300 words) that includes: (1) the author's central\n"
+        f"argument in their own framing, (2) at least one direct quote or near-quote of a\n"
+        f"specific line from the piece if available, (3) any concrete numbers or examples\n"
+        f"they cite. If you cannot find a real piece matching this claim from this author,\n"
+        f"return 'UNKNOWN' exactly."
+    )
+    try:
+        out = pplx_chat(prompt, RESEARCH_MODEL, 800, temperature=0.2).strip()
+    except Exception as e:
+        print(f"[buzz] essay context fetch failed: {e}", file=sys.stderr)
+        return None
+    if not out or out.strip().upper().startswith("UNKNOWN"):
+        return None
+    return out[:2400]
+
+
+def _fetch_tweet_context(headline: str, source: str, url: str | None) -> str | None:
+    """Sonar-based fallback for X posts when fxtwitter fetch fails (deleted, bad ID).
+
+    Asks Sonar to find the actual take from the named handle on this topic.
+    Returns 150-250 word paragraph or None.
+    """
+    if not (source or headline):
+        return None
+    handle = source if source.startswith("@") else f"from {source}"
+    prompt = (
+        f"{today_preamble()}\n"
+        f"Find the actual recent take {handle} has made on this topic:\n"
+        f"  Claim: {headline}\n"
+        f"  Hinted URL (may be wrong): {url or '(none)'}\n\n"
+        f"Return ONE paragraph (150-250 words) capturing: (1) the substance of the\n"
+        f"take from that person/account, (2) at least one direct quote or near-quote\n"
+        f"if available, (3) any specific numbers or examples they used. If you cannot\n"
+        f"verify that person has publicly said this recently, return 'UNKNOWN' exactly."
+    )
+    try:
+        out = pplx_chat(prompt, RESEARCH_MODEL, 700, temperature=0.2).strip()
+    except Exception as e:
+        print(f"[buzz] tweet context fetch failed: {e}", file=sys.stderr)
+        return None
+    if not out or out.strip().upper().startswith("UNKNOWN"):
+        return None
+    return out[:2000]
+
+
+def fetch_buzzing_material(arguments_topics: list[dict[str, Any]],
+                            max_items: int = 8) -> list[dict[str, Any]]:
+    """For each curated arguments topic, attach a 'source_text' field with deep material.
+
+    Skips items that don't have a fetchable URL. Returns the input list with new fields:
+      - source_text: str   (when successfully fetched)
+      - source_kind: str   (one of: tweet, essay, podcast, unknown)
+    """
+    out: list[dict[str, Any]] = []
+    for t in arguments_topics[:max_items]:
+        beat = (t.get("beat") or "").lower()
+        url = t.get("url") or ""
+        enriched = dict(t)
+        kind = "unknown"
+        text: str | None = None
+
+        m = _TWITTER_URL_RE.search(url) if url else None
+        if m:
+            kind = "tweet"
+            tweet = _fetch_tweet_text(m.group(1), m.group(2))
+            if tweet:
+                text = f"@{tweet['author'].split(' (')[0].strip()}: \"{tweet['text']}\""
+            else:
+                # fxtwitter failed (deleted/hallucinated ID) -> Sonar fallback
+                text = _fetch_tweet_context(t.get("headline", ""), t.get("source", ""), url)
+        elif beat == "twitter" or (t.get("source") or "").startswith("@"):
+            # twitter beat but URL not pattern-matchable (or missing) -> Sonar fallback
+            kind = "tweet"
+            text = _fetch_tweet_context(t.get("headline", ""), t.get("source", ""), url)
+        elif beat == "podcasts" or "podcast" in (t.get("source") or "").lower():
+            kind = "podcast"
+            text = _fetch_podcast_context(t.get("headline", ""), t.get("source", ""), url)
+        elif beat in {"substack"} or url:
+            kind = "essay"
+            if url and url.startswith(("http://", "https://")):
+                text = _fetch_article_text(url)
+            if not text:
+                # 404 / paywall / JS-rendered -> Sonar fallback
+                text = _fetch_essay_context(t.get("headline", ""), t.get("source", ""), url)
+
+        if text:
+            enriched["source_text"] = text
+            enriched["source_kind"] = kind
+            print(f"[buzz] enriched {kind}: '{t.get('headline','')[:60]}' "
+                  f"({len(text)} chars)", file=sys.stderr)
+        else:
+            enriched["source_kind"] = kind
+            print(f"[buzz] no source_text for {kind}: '{t.get('headline','')[:60]}'",
+                  file=sys.stderr)
+        out.append(enriched)
+    return out
+
+
+def render_buzzing_block(enriched: list[dict[str, Any]]) -> str:
+    """Render the deep buzzing material into a writer-facing block."""
+    parts: list[str] = []
+    parts.append("=" * 60)
+    parts.append("BUZZING TOPICS — DEEP MATERIAL TO ANALYZE")
+    parts.append("=" * 60)
+    parts.append("These are the actual source texts from the highest-signal X posts,")
+    parts.append("essays, and podcast conversations the curator picked for arguments.")
+    parts.append("DO NOT just paraphrase the headline — quote specific lines, name the")
+    parts.append("author, then push back, agree, or build on the argument. This is the")
+    parts.append("ANALYTICAL HEART of the show.")
+    parts.append("")
+    any_with_source = False
+    for i, t in enumerate(enriched, 1):
+        if not t.get("source_text"):
+            continue
+        any_with_source = True
+        kind = t.get("source_kind", "unknown")
+        head = t.get("headline", "")
+        src = t.get("source", "")
+        url = t.get("url", "")
+        parts.append(f"--- BUZZ {i} [{kind.upper()}] ---")
+        parts.append(f"Headline: {head}")
+        if src:
+            parts.append(f"Source:   {src}")
+        if url:
+            parts.append(f"URL:      {url}")
+        parts.append("Full source text:")
+        parts.append(t["source_text"])
+        parts.append("")
+    if not any_with_source:
+        parts.append("(no deep buzzing material could be fetched today — work from "
+                     "headlines in CURATED TOPICS)")
+    return "\n".join(parts)
+
+
+def write_segment(seg: dict[str, Any],
+                  curated_topics: list[dict[str, Any]],
+                  markets: str,
+                  recap_block: str,
+                  prior_segments: list[list[dict[str, str]]],
+                  date_str: str,
+                  editor_note: str = "",
+                  buzzing_block: str = "") -> list[dict[str, str]]:
+    """Generate one segment of dialogue from CURATED topics."""
+    # Short-circuit: empty topics in a content segment — emit honest skip line
+    # rather than letting the model hallucinate.
+    if seg["key"] in CONTENT_SEGMENTS and not curated_topics:
+        skip = SKIP_LINES.get(seg["key"], [
+            {"speaker": "kore", "text": f"Nothing strong in {seg['label']} today. Moving on."},
+        ])
+        out = [{**l, "segment": seg["key"], "segment_label": seg["label"]} for l in skip]
+        words = sum(len(line["text"].split()) for line in out)
+        print(f"[segment {seg['key']}] EMPTY topics — emitted {len(out)} skip line ({words} words)",
+              file=sys.stderr)
+        return out
+
+    topics_block = render_curated_topics(curated_topics)
+    if seg["key"] == "economy":
+        topics_block = topics_block + "\n\n" + build_markets_overlay(markets)
+    if seg["key"] == "arguments" and buzzing_block:
+        topics_block = topics_block + "\n\n" + buzzing_block
+    prior_block = compact_prior_segments(prior_segments)
+
+    _today_obj = dt.date.fromisoformat(date_str) if isinstance(date_str, str) else dt.date.today()
+    user_prompt = SCRIPT_SEGMENT_USER_TEMPLATE.format(
+        today_preamble=today_preamble(_today_obj).strip(),
+        date=date_str,
+        day_name=_today_obj.strftime("%A"),
+        label=seg["label"],
+        words=seg["words"],
+        purpose=SEGMENT_PURPOSE.get(seg["key"], ""),
+        lookback=RECAP_LOOKBACK_DAYS,
+        recap_block=recap_block,
+        research_block=topics_block,
+        prior_segments_block=prior_block,
+        editor_note=editor_note or "(no editor note)",
+    )
+
+    max_tokens = max(2500, int(seg["words"] * 4.0))
+    raw = pplx_chat(user_prompt, model=SCRIPT_MODEL, max_tokens=max_tokens,
+                    system=SCRIPT_SEGMENT_SYSTEM_PROMPT, temperature=0.7)
+
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```\s*$", "", cleaned)
+    start, end = cleaned.find("["), cleaned.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        cleaned = cleaned[start:end + 1]
+
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        # SALVAGE valid lines from partial output - this was the v2 bug that lost culture/fodder
+        debug_path = EPISODES_DIR / date_str / f"segment_raw_{seg['key']}.txt"
+        debug_path.parent.mkdir(parents=True, exist_ok=True)
+        debug_path.write_text(raw)
+        data = _salvage_dialogue_lines(cleaned)
+        if data:
+            print(f"[segment {seg['key']}] JSON parse failed ({e}); SALVAGED {len(data)} valid lines",
+                  file=sys.stderr)
+        else:
+            print(f"[segment {seg['key']}] JSON parse failed: {e}. Raw saved to {debug_path}",
+                  file=sys.stderr)
+            return []
+
+    valid = []
+    for line in data:
+        if (isinstance(line, dict)
+                and line.get("speaker") in ("kore", "charon")
+                and isinstance(line.get("text"), str)):
+            valid.append({
+                "speaker": line["speaker"],
+                "text": line["text"],
+                "segment": seg["key"],
+                "segment_label": seg["label"],
+            })
+    words = sum(len(line["text"].split()) for line in valid)
+    print(f"[segment {seg['key']}] {len(valid)} lines, {words} words (target {seg['words']})",
+          file=sys.stderr)
+    return valid
+
+
+def generate_script(curated: dict[str, Any],
+                    markets: str,
+                    recap_block: str,
+                    segments: list[dict[str, Any]],
+                    date_str: str) -> list[dict[str, str]]:
+    # v6.1: pre-fetch deep source material for the arguments segment
+    _args_topics = (curated.get("segments") or {}).get("arguments") or []
+    buzzing_enriched: list[dict[str, Any]] = []
+    buzzing_block_str = ""
+    if _args_topics:
+        try:
+            buzzing_enriched = fetch_buzzing_material(_args_topics, max_items=8)
+            buzzing_block_str = render_buzzing_block(buzzing_enriched)
+            # Persist for debugging/inspection
+            (EPISODES_DIR / date_str).mkdir(parents=True, exist_ok=True)
+            (EPISODES_DIR / date_str / "buzzing.txt").write_text(buzzing_block_str)
+        except Exception as e:
+            print(f"[buzz] fetch_buzzing_material FAILED (non-fatal): {e}", file=sys.stderr)
+
+    """Multi-pass script generation: write each segment separately from CURATED topics.
+
+    Before each segment (except cold_open), insert a DETERMINISTIC intro line from
+    SEGMENT_INTROS so transitions are crisp and predictable. The LLM still writes the
+    segment body — the intro is a hardcoded one-liner host handoff.
+    """
+    all_lines: list[dict[str, str]] = []
+    prior_segments: list[list[dict[str, str]]] = []
+    seg_picks = curated.get("segments", {})
+    editor_note = curated.get("editor_note", "")
+
+    for seg in segments:
+        topics = seg_picks.get(seg["key"], [])
+        _seg_buzz = buzzing_block_str if seg["key"] == "arguments" else ""
+        lines = write_segment(seg, topics, markets, recap_block,
+                              prior_segments, date_str, editor_note,
+                              buzzing_block=_seg_buzz)
+
+        # Prepend a hardcoded intro line for segments that have one defined.
+        intro = SEGMENT_INTROS.get(seg["key"])
+        if intro and lines:
+            intro_line = {
+                "speaker": intro["speaker"],
+                "text": intro["text"],
+                "segment": seg["key"],
+                "segment_label": seg["label"],
+                "is_intro": True,
+            }
+            lines = [intro_line] + lines
+
+        all_lines.extend(lines)
+        prior_segments.append(lines)
+    return all_lines
+
+
+
+
+# ─── TTS ─────────────────────────────────────────────────────────────────────
+
+def openai_tts(text: str, voice: str, out_path: Path, retries: int = 6) -> None:
+    """Generate one TTS clip via OpenAI. Honors Retry-After on 429."""
+    payload = {"model": TTS_MODEL, "input": text, "voice": voice, "response_format": "mp3"}
+    last_err: Exception | None = None
+    for attempt in range(retries):
+        try:
+            r = httpx.post(
+                OPENAI_TTS_URL, json=payload,
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"}, timeout=180,
+            )
+            if r.status_code == 429:
+                retry_after = r.headers.get("retry-after")
+                wait = float(retry_after) if retry_after else (2 ** attempt) + 1
+                wait = min(wait, 60)
+                print(f"[tts] {out_path.name} 429, sleeping {wait:.1f}s", file=sys.stderr)
+                time.sleep(wait)
+                continue
+            r.raise_for_status()
+            out_path.write_bytes(r.content)
+            return
+        except Exception as e:
+            last_err = e
+            print(f"[tts] {out_path.name} attempt {attempt+1} failed: {e}", file=sys.stderr)
+            time.sleep(2 ** attempt)
+    raise RuntimeError(f"openai_tts failed for {out_path.name}: {last_err}")
+
+
+def chunk_dialogue(dialogue: list[dict[str, str]]) -> list[tuple[str, str]]:
+    """Group consecutive lines from same speaker into TTS-safe chunks."""
+    chunks: list[tuple[str, str]] = []
+    current_speaker: str | None = None
+    current_parts: list[str] = []
+    current_len = 0
+
+    def voice_for(speaker: str) -> str:
+        return HOST_A_VOICE if speaker == "kore" else HOST_B_VOICE
+
+    def flush() -> None:
+        nonlocal current_parts, current_len
+        if current_speaker and current_parts:
+            text = " ".join(current_parts).strip()
+            if text:
+                chunks.append((voice_for(current_speaker), text))
+        current_parts = []
+        current_len = 0
+
+    for line in dialogue:
+        speaker = line["speaker"]
+        text = line["text"]
+        # Strip stage directions
+        text = re.sub(r"\[pause\]", "...", text, flags=re.IGNORECASE)
+        text = re.sub(r"\[[^\]]+\]", "", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text:
+            continue
+
+        would_exceed = current_len + len(text) + 1 > TTS_CHUNK_CHAR_BUDGET
+        if speaker != current_speaker or would_exceed:
+            flush()
+            current_speaker = speaker
+
+        current_parts.append(text)
+        current_len += len(text) + 1
+
+    flush()
+    return chunks
+
+
+def generate_audio(dialogue: list[dict[str, str]], work_dir: Path) -> Path:
+    """TTS all chunks, stitch with ffmpeg. Resumes existing chunks; raises on any missing."""
+    work_dir.mkdir(parents=True, exist_ok=True)
+    chunks = chunk_dialogue(dialogue)
+    print(f"[audio] {len(chunks)} chunks to render", file=sys.stderr)
+
+    chunk_files: list[Path] = [work_dir / f"chunk_{i:03d}.mp3" for i in range(len(chunks))]
+    # Identify which need rendering (resume support)
+    todo = [(i, voice, text) for i, (voice, text) in enumerate(chunks)
+            if not (chunk_files[i].exists() and chunk_files[i].stat().st_size > 1000)]
+    skipped = len(chunks) - len(todo)
+    if skipped:
+        print(f"[audio] resuming: {skipped} chunks already present, {len(todo)} to render", file=sys.stderr)
+
+    failures: list[tuple[int, str]] = []
+    completed = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+        fut_to_idx = {
+            pool.submit(openai_tts, text, voice, chunk_files[i]): i
+            for (i, voice, text) in todo
+        }
+        for fut in concurrent.futures.as_completed(fut_to_idx):
+            idx = fut_to_idx[fut]
+            completed += 1
+            try:
+                fut.result()
+                if completed % 10 == 0 or completed == len(todo):
+                    print(f"[audio] {completed}/{len(todo)} chunks done", file=sys.stderr)
+            except Exception as e:
+                failures.append((idx, str(e)))
+                print(f"[audio] chunk {idx} FAILED: {e}", file=sys.stderr)
+
+    # Second pass: retry failures serially
+    if failures:
+        print(f"[audio] {len(failures)} chunks failed, retrying serially…", file=sys.stderr)
+        still_failed = []
+        for idx, _err in failures:
+            voice, text = chunks[idx]
+            try:
+                openai_tts(text, voice, chunk_files[idx])
+                print(f"[audio] chunk {idx} recovered on retry", file=sys.stderr)
+            except Exception as e:
+                still_failed.append((idx, str(e)))
+                print(f"[audio] chunk {idx} FINAL FAIL: {e}", file=sys.stderr)
+        if still_failed:
+            raise RuntimeError(f"TTS unrecoverable failures: {still_failed}")
+
+    # Verify all chunks present and non-trivially-sized
+    missing = [i for i, p in enumerate(chunk_files) if not (p.exists() and p.stat().st_size > 1000)]
+    if missing:
+        raise RuntimeError(f"TTS chunks missing after render: {missing}")
+
+    concat_list = work_dir / "concat.txt"
+    concat_list.write_text("\n".join(f"file '{p.name}'" for p in chunk_files))
+
+    final_path = work_dir / f"briefing_{dt.date.today().isoformat()}.mp3"
+    subprocess.run([
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+        "-i", str(concat_list),
+        "-acodec", "libmp3lame", "-b:a", "128k", "-ar", "44100",
+        str(final_path),
+    ], check=True, capture_output=True)
+
+    for p in chunk_files:
+        p.unlink(missing_ok=True)
+    concat_list.unlink(missing_ok=True)
+
+    return final_path
+
+
+def get_audio_duration(mp3_path: Path) -> float:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(mp3_path)],
+        capture_output=True, text=True, check=True,
+    )
+    return float(result.stdout.strip())
+
+
+# ─── MAIN ────────────────────────────────────────────────────────────────────
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--test", action="store_true", help="Short test run (3 segments)")
+    parser.add_argument("--skip-tts", action="store_true", help="Stop after script + recap")
+    parser.add_argument("--recap-only", action="store_true",
+                        help="Regenerate today's recap from existing script.json")
+    parser.add_argument("--from-script", action="store_true",
+                        help="Skip research+curator+writer; render audio from existing script.json")
+    args = parser.parse_args()
+
+    today = dt.date.today().isoformat()
+    work_dir = EPISODES_DIR / today
+    work_dir.mkdir(parents=True, exist_ok=True)
+    t0 = time.time()
+
+    # --from-script path: render TTS from an existing script.json (recovery / fast iteration)
+    if args.from_script:
+        script_path = work_dir / "script.json"
+        if not script_path.exists():
+            print(f"No script.json at {script_path}", file=sys.stderr)
+            return 1
+        dialogue = json.loads(script_path.read_text())
+        total_words = sum(len(line["text"].split()) for line in dialogue)
+        print(f"[from-script] loaded {len(dialogue)} lines, {total_words} words", file=sys.stderr)
+        recap_path = RECAPS_DIR / f"{today}.json"
+        if not recap_path.exists():
+            recap = extract_recap(dialogue, today)
+            recap_path.write_text(json.dumps(recap, indent=2))
+        print("[from-script] Audio…", file=sys.stderr)
+        final_mp3 = generate_audio(dialogue, work_dir)
+        duration = get_audio_duration(final_mp3)
+        result = {
+            "status": "ok",
+            "date": today,
+            "mp3_path": str(final_mp3),
+            "mp3_size_bytes": final_mp3.stat().st_size,
+            "duration_seconds": round(duration, 1),
+            "duration_minutes": round(duration / 60, 1),
+            "line_count": len(dialogue),
+            "word_count": total_words,
+            "elapsed_sec": round(time.time() - t0, 1),
+            "script_path": str(script_path),
+            "recap_path": str(recap_path),
+        }
+        print(json.dumps(result))
+        return 0
+
+    # --recap-only path: skip everything, just rebuild recap
+    if args.recap_only:
+        script_path = work_dir / "script.json"
+        if not script_path.exists():
+            print(f"No script.json at {script_path}", file=sys.stderr)
+            return 1
+        dialogue = json.loads(script_path.read_text())
+        recap = extract_recap(dialogue, today)
+        recap_path = RECAPS_DIR / f"{today}.json"
+        recap_path.write_text(json.dumps(recap, indent=2))
+        print(json.dumps({"status": "recap_only", "recap_path": str(recap_path)}))
+        return 0
+
+    segments = SEGMENTS_TEST if args.test else SEGMENTS_FULL
+
+    print("[1/6] Loading recap memory…", file=sys.stderr)
+    recaps = load_recent_recaps()
+    recap_block = format_recaps_for_writer(recaps)
+    (work_dir / "recap_context.txt").write_text(recap_block)
+
+    print("[2/7] Wide-net research (15 beats)…", file=sys.stderr)
+    research = gather_research()
+    (work_dir / "research.json").write_text(json.dumps(research, indent=2))
+    total_cands = sum(len(v) for v in research.values())
+    print(f"[research] {total_cands} total candidate topics", file=sys.stderr)
+
+    print("[3/7] Markets…", file=sys.stderr)
+    markets = gather_markets()
+    (work_dir / "markets.txt").write_text(markets)
+
+    print("[4/7] Curator (rank + balance)…", file=sys.stderr)
+    curated = curate_topics(research, recap_block, today)
+    curated = programmatic_dedupe(curated, recaps, today)
+    (work_dir / "curated.json").write_text(json.dumps(curated, indent=2))
+    (work_dir / "curated.json").write_text(json.dumps(curated, indent=2))
+
+    print(f"[5/7] Script ({len(segments)} segments, multi-pass)…", file=sys.stderr)
+    dialogue = generate_script(curated, markets, recap_block, segments, today)
+    print("[5/6] Fact-checking numeric claims…", file=sys.stderr)
+    dialogue, fc_log = fact_check_script(dialogue, today)
+    for ln in fc_log:
+        print(ln, file=sys.stderr)
+    (work_dir / "fact_check.log").write_text("\n".join(fc_log))
+    (work_dir / "script.json").write_text(json.dumps(dialogue, indent=2))
+    total_words = sum(len(line["text"].split()) for line in dialogue)
+    print(f"[script] {len(dialogue)} total lines, {total_words} words "
+          f"(~{total_words/150:.1f} min target)", file=sys.stderr)
+
+    print("[6/7] Recap extraction…", file=sys.stderr)
+    recap = extract_recap(dialogue, today)
+    recap_path = RECAPS_DIR / f"{today}.json"
+    recap_path.write_text(json.dumps(recap, indent=2))
+
+    if args.skip_tts:
+        result = {
+            "status": "skipped_tts",
+            "date": today,
+            "script_path": str(work_dir / "script.json"),
+            "recap_path": str(recap_path),
+            "line_count": len(dialogue),
+            "word_count": total_words,
+            "elapsed_sec": round(time.time() - t0, 1),
+        }
+        print(json.dumps(result))
+        return 0
+
+    print("[7/7] Audio…", file=sys.stderr)
+    final_mp3 = generate_audio(dialogue, work_dir)
+    duration = get_audio_duration(final_mp3)
+
+    result = {
+        "status": "ok",
+        "date": today,
+        "mp3_path": str(final_mp3),
+        "mp3_size_bytes": final_mp3.stat().st_size,
+        "duration_seconds": round(duration, 1),
+        "duration_minutes": round(duration / 60, 1),
+        "line_count": len(dialogue),
+        "word_count": total_words,
+        "elapsed_sec": round(time.time() - t0, 1),
+        "research_path": str(work_dir / "research.json"),
+        "curated_path": str(work_dir / "curated.json"),
+        "script_path": str(work_dir / "script.json"),
+        "recap_path": str(recap_path),
+        "prior_recaps_used": len(recaps),
+        "candidate_topics": total_cands,
+    }
+    print(json.dumps(result))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

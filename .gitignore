@@ -1,0 +1,23 @@
+# Generated episodes — large and ephemeral; do not commit
+episodes/
+
+# Recap MEMORY is the exception: it must persist between runs for dedupe.
+# Keep `recaps/` tracked. Workflow commits today's recap after each run.
+
+# Local env files
+.env
+.env.local
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# Build artifacts / backups from local iteration
+*.bak.py
+_*_patch.py
+run.log
+result.json

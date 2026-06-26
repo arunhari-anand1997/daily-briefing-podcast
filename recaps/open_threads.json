@@ -1,0 +1,116 @@
+{
+  "updated": "2026-06-26",
+  "threads": [
+    {
+      "thread_id": "venezuela_double_earthquake_2026",
+      "label": "Venezuela reels from rare double earthquake that kills at least 188 and buries hundreds, p",
+      "first_episode": "2026-06-26",
+      "last_episode": "2026-06-26",
+      "next_milestone": "",
+      "hooks": [
+        "Death toll has reached at least ~188–235 people with hundreds trapped and tens of thousands missing after the rare 7.2/7.5 earthquake doublet near Caracas, triggering large-scale international rescue efforts and political scrutiny."
+      ],
+      "status": "developing"
+    },
+    {
+      "thread_id": "us_iran_hostilities_sanctions_waiver_2026",
+      "label": "Interim U.S.–Iran nuclear accord gives IAEA wider access as Tehran seeks final deal and sa",
+      "first_episode": "2026-06-26",
+      "last_episode": "2026-06-26",
+      "next_milestone": "",
+      "hooks": [
+        "Iran hit a commercial vessel on a UN‑escorted corridor in the Strait of Hormuz, causing the UN to pause a new maritime evacuation plan amid the ongoing U.S.–Iran hostilities we covered with war powers resolutions and sanctions waivers.",
+        "An interim U.S.–Iran nuclear accord now grants IAEA inspectors expanded access to Iranian nuclear facilities as Tehran pursues a final deal and sanctions relief, adding a diplomatic layer to the previously covered hostilities and sanctions waiver."
+      ],
+      "status": "developing"
+    },
+    {
+      "thread_id": "russia_ukraine_war_2026",
+      "label": "European Union moves to extend temporary protection for millions of Ukrainian refugees",
+      "first_episode": "2026-06-26",
+      "last_episode": "2026-06-26",
+      "next_milestone": "",
+      "hooks": [
+        "continuing coverage of an ongoing story"
+      ],
+      "status": "developing"
+    },
+    {
+      "thread_id": "us_inflation_fed_policy_2026",
+      "label": "U.S. core PCE inflation cools further in May, reinforcing expectations for Fed rate cuts t",
+      "first_episode": "2026-06-26",
+      "last_episode": "2026-06-26",
+      "next_milestone": "",
+      "hooks": [
+        "New Commerce Department data show core PCE rose 0.2% in May and 2.6% year‑over‑year, indicating further cooling versus the previously covered 3.4% core PCE figure and strengthening expectations for Fed rate cuts."
+      ],
+      "status": "developing"
+    },
+    {
+      "thread_id": "oil_markets_iran_sanctions_waiver_2026",
+      "label": "Oil prices rise toward three‑month highs as Middle East disruptions and strong summer dema",
+      "first_episode": "2026-06-26",
+      "last_episode": "2026-06-26",
+      "next_milestone": "",
+      "hooks": [
+        "Brent climbed above $89 and WTI near $86 per barrel, reversing the earlier fall in prices we covered after the Iran sanctions waiver, now driven by Middle East disruptions and strong summer demand."
+      ],
+      "status": "developing"
+    },
+    {
+      "thread_id": "samsung_buyback_chip_strategy_2026",
+      "label": "Samsung plans $648 billion South Korea investment push, including massive chip expansion",
+      "first_episode": "2026-06-26",
+      "last_episode": "2026-06-26",
+      "next_milestone": "",
+      "hooks": [
+        "Samsung is preparing a 1,000 trillion won (about $648 billion) ten‑year investment plan in South Korea, including roughly 300 trillion won for new chip fabs, building on the previously covered $58.6 billion share buyback and signaling a larger strategic expansion."
+      ],
+      "status": "developing"
+    },
+    {
+      "thread_id": "credit_markets_volatility_2026",
+      "label": "Byrne Hobart explains why recent credit market tremors could be the start of a broader rep",
+      "first_episode": "2026-06-26",
+      "last_episode": "2026-06-26",
+      "next_milestone": "",
+      "hooks": [
+        "Byrne Hobart’s essay interprets the recent weeks of widening credit spreads and outflows from high‑yield and private credit funds we covered as potential early signs of a broader regime shift in risk pricing."
+      ],
+      "status": "developing"
+    },
+    {
+      "thread_id": "house_of_the_dragon_s3_2026",
+      "label": "“House of the Dragon” Season 3 is the dominant TV conversation as the Dance of the Dragons",
+      "first_episode": "2026-06-26",
+      "last_episode": "2026-06-26",
+      "next_milestone": "",
+      "hooks": [
+        "Following our mention of the Season 3 premiere, new coverage highlights that House of the Dragon has become the dominant TV conversation as the Dance of the Dragons storyline fully begins."
+      ],
+      "status": "developing"
+    },
+    {
+      "thread_id": "usmnt_world_cup_group_d_2026",
+      "label": "USMNT focus on Bosnia knockout clash after Türkiye loss closes out World Cup group stage",
+      "first_episode": "2026-06-26",
+      "last_episode": "2026-06-26",
+      "next_milestone": "",
+      "hooks": [
+        "Following the 3-2 loss to Türkiye, new reports describe the USMNT pivoting to their round of 16 World Cup knockout match against Bosnia and Herzegovina while still advancing as Group D winners."
+      ],
+      "status": "developing"
+    },
+    {
+      "thread_id": "giannis_trade_rumors_2026",
+      "label": "Giannis Antetokounmpo to be traded to Miami Heat in blockbuster NBA deal, according to AP ",
+      "first_episode": "2026-06-26",
+      "last_episode": "2026-06-26",
+      "next_milestone": "",
+      "hooks": [
+        "An AP-sourced report now says Giannis Antetokounmpo is set to be traded to the Miami Heat in a blockbuster deal that would reshape the NBA landscape."
+      ],
+      "status": "developing"
+    }
+  ]
+}

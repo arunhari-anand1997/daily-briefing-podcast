@@ -41,6 +41,31 @@ def test_yoy_change_needs_13_points():
     assert macro.yoy_change(obs) is None
 
 
+def test_build_macro_snapshot_with_injected_fetch():
+    # 13 monthly rows so YoY works; +3.4% for the index series.
+    def fake_fetch(url):
+        rows = ["observation_date,V"]
+        base = 100.0
+        for m in range(13):
+            y, mo = (2025, 5 + m) if 5 + m <= 12 else (2026, (5 + m) - 12)
+            val = base if m < 12 else base * 1.034
+            rows.append(f"{y}-{mo:02d}-01,{val:.3f}")
+        return "\n".join(rows)
+    snap = macro.build_macro_snapshot(today=dt.date(2026, 6, 1), fetch_fn=fake_fetch)
+    assert "LIVE MACRO SNAPSHOT" in snap
+    assert "+3.4%" in snap  # YoY computed from the injected data
+
+
+def test_build_macro_snapshot_logs_and_returns_empty_on_failure():
+    msgs = []
+    def boom(url):
+        raise RuntimeError("blocked")
+    snap = macro.build_macro_snapshot(today=dt.date(2026, 6, 1),
+                                      fetch_fn=boom, log=msgs.append)
+    assert snap == ""
+    assert msgs and "fetch failed" in msgs[0]
+
+
 def test_yoy_change_uses_nearest_prior_month():
     obs = [(dt.date(2025, 1, 1), 200.0)]
     obs += [(dt.date(2025, m, 1), 200.0) for m in range(2, 13)]

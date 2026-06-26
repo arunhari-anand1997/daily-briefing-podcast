@@ -1675,15 +1675,27 @@ def build_macro_overlay(macro: str) -> str:
     return macro
 
 
+def _macro_http_get(url: str) -> str:
+    """Fetch a FRED CSV via httpx (handles gzip/redirects/TLS; proven on the runner)."""
+    r = httpx.get(url, timeout=15.0, follow_redirects=True,
+                  headers={"User-Agent": "Mozilla/5.0 (podcast-macro)"})
+    r.raise_for_status()
+    return r.text
+
+
 def gather_macro() -> str:
     """Real macro snapshot from FRED (best-effort, non-fatal)."""
     print("[macro] fetching real macro data from FRED...", file=sys.stderr)
     try:
-        snap = macro_mod.build_macro_snapshot()
+        snap = macro_mod.build_macro_snapshot(
+            fetch_fn=_macro_http_get, log=lambda m: print(m, file=sys.stderr))
     except Exception as e:  # noqa: BLE001
         print(f"[macro] FRED fetch failed (non-fatal): {e}", file=sys.stderr)
         return ""
-    if not snap:
+    if snap:
+        n = snap.count("\n- ")
+        print(f"[macro] FRED ok — {n} series grounded", file=sys.stderr)
+    else:
         print("[macro] no macro data (FRED unreachable) — falling back to research", file=sys.stderr)
     return snap
 

@@ -21,9 +21,22 @@ import csv
 import datetime as dt
 import io
 import urllib.request as _urlreq
+from typing import Callable
+
+# Network fetch is dependency-injected (FetchFn: url -> csv text) so the parsing
+# logic stays unit-testable and the caller can supply a robust client. podcast.py
+# passes an httpx-based fetcher (handles gzip/redirects/TLS, proven on the runner);
+# the urllib default below is only a standalone fallback.
+FetchFn = Callable[[str], str]
 
 _FRED_OPENER = _urlreq.build_opener(_urlreq.ProxyHandler({}))
 _FRED_CSV = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}&cosd={cosd}"
+
+
+def _default_fetch(url: str, timeout: float = 15.0) -> str:
+    req = _urlreq.Request(url, headers={"User-Agent": "Mozilla/5.0 (podcast-macro)"})
+    with _FRED_OPENER.open(req, timeout=timeout) as r:
+        return r.read().decode("utf-8", "replace")
 
 # (series_id, label, kind). kind drives how we present it:
 #   "yoy"   — monthly price index → report year-over-year % change + the index month
@@ -83,29 +96,37 @@ def yoy_change(obs: list[tuple[dt.date, float]]) -> tuple[float, dt.date] | None
     return (latest_val / prior[1] - 1.0) * 100.0, latest_date
 
 
-def _fetch_series(sid: str, cosd: str, timeout: float = 12.0) -> list[tuple[dt.date, float]]:
-    url = _FRED_CSV.format(sid=sid, cosd=cosd)
-    req = _urlreq.Request(url, headers={"User-Agent": "Mozilla/5.0 (podcast-macro)"})
-    with _FRED_OPENER.open(req, timeout=timeout) as r:
-        return parse_fred_csv(r.read().decode("utf-8", "replace"))
-
-
 def _fmt_month(d: dt.date) -> str:
     return d.strftime("%b %Y")
 
 
-def build_macro_snapshot(today: dt.date | None = None) -> str:
-    """Fetch the macro series and render a ground-truth block, or '' if unreachable."""
+def build_macro_snapshot(today: dt.date | None = None,
+                         fetch_fn: FetchFn | None = None,
+                         log: Callable[[str], None] | None = None) -> str:
+    """Fetch the macro series and render a ground-truth block, or '' if unreachable.
+
+    ``fetch_fn(url) -> csv_text`` is injected; defaults to a urllib fetcher. The
+    first fetch failure is reported via ``log`` so an empty result is diagnosable
+    rather than silent.
+    """
     today = today or dt.date.today()
+    fetch_fn = fetch_fn or _default_fetch
     cosd = (today - dt.timedelta(days=900)).isoformat()  # ~2.5y of history for YoY
     lines: list[str] = []
     funds = {}
+    first_err_logged = False
     for sid, label, kind in _SERIES:
         try:
-            obs = _fetch_series(sid, cosd)
-        except Exception:
+            obs = parse_fred_csv(fetch_fn(_FRED_CSV.format(sid=sid, cosd=cosd)))
+        except Exception as e:  # noqa: BLE001
+            if log and not first_err_logged:
+                log(f"[macro] fetch failed for {sid}: {type(e).__name__}: {e}")
+                first_err_logged = True
             continue
         if not obs:
+            if log and not first_err_logged:
+                log(f"[macro] empty/unparseable CSV for {sid}")
+                first_err_logged = True
             continue
         if kind == "yoy":
             res = yoy_change(obs)

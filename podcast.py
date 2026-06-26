@@ -109,24 +109,27 @@ TTS_CHUNK_CHAR_BUDGET = 3500
 
 # Segments map to CONTENT TYPES, not raw research beats. The curator (next stage)
 # picks which specific stories land in each segment.
+# v8 taste-spec lineup: ~120 min broadcast structure (≈150 wpm → ~18k words).
+# Balanced across domains; Tech & AI is deliberately capped (see curator + caps).
 SEGMENTS_FULL: list[dict[str, Any]] = [
-    {"key": "cold_open",     "label": "Cold open",                                "words": 180},
-    {"key": "world",         "label": "World & geopolitics",                     "words": 1100},
-    {"key": "economy",       "label": "Economy & markets",                       "words": 900},
-    {"key": "science",       "label": "Science, biotech & wild studies",         "words": 1100},
-    {"key": "tech_business", "label": "Tech & business",                         "words": 1700},
-    {"key": "arguments",     "label": "Arguments worth knowing about",           "words": 3000},
-    {"key": "culture",       "label": "Culture: what everyone is talking about", "words": 1300},
-    {"key": "sports",        "label": "Sports",                                  "words": 1100},
-    {"key": "cutting_floor", "label": "From the cutting room floor",             "words": 600},
-    {"key": "signoff",       "label": "Sign-off",                                "words": 150},
+    {"key": "cold_open",    "label": "Cold open & headlines",            "words": 700},
+    {"key": "hard_news",    "label": "Hard news",                        "words": 2600},
+    {"key": "politics",     "label": "Politics & policy arguments",      "words": 2000},
+    {"key": "economy",      "label": "Economics, business & markets",    "words": 2000},
+    {"key": "tech_ai",      "label": "Tech & AI",                        "words": 2000},
+    {"key": "science",      "label": "Science & discovery",             "words": 2300},
+    {"key": "feature",      "label": "Feature essay / longform",         "words": 2300},
+    {"key": "culture",      "label": "Culture",                          "words": 1900},
+    {"key": "sports",       "label": "Sports narratives & standings",    "words": 1500},
+    {"key": "disagreement", "label": "Room for disagreement",            "words": 850},
+    {"key": "signoff",      "label": "Outro",                            "words": 400},
 ]
 
-# Subset for --test mode (~5 min episode)
+# Subset for --test mode (~6 min episode)
 SEGMENTS_TEST: list[dict[str, Any]] = [
-    {"key": "cold_open", "label": "Cold open", "words": 100},
-    {"key": "arguments", "label": "Arguments worth knowing about", "words": 500},
-    {"key": "signoff", "label": "Sign-off", "words": 100},
+    {"key": "cold_open", "label": "Cold open & headlines", "words": 120},
+    {"key": "feature", "label": "Feature essay / longform", "words": 500},
+    {"key": "signoff", "label": "Outro", "words": 100},
 ]
 
 # ─── RESEARCH BEATS ──────────────────────────────────────────────────────────
@@ -771,89 +774,96 @@ def extract_recap(dialogue: list[dict[str, str]], date_str: str,
 
 # Target topic count per segment. The curator tries to hit these.
 SEGMENT_TARGET_TOPICS: dict[str, int] = {
-    "world": 5,
-    "economy": 4,
-    "science": 5,
-    "tech_business": 7,       # bumped: more startups + AI + non-AI tech
-    "arguments": 8,           # centerpiece, drawing from X / Reddit / Substack / podcasts equally
-    "culture": 6,             # what everyone is talking about
-    "sports": 6,              # multi-league coverage, every active tournament gets a slot
-    "cutting_floor": 6,       # quick-hit runners-up
+    "hard_news": 5,           # major US + world stories with context
+    "politics":  4,           # competing views + implications
+    "economy":   4,           # macro, markets, companies (real Yahoo prices, see overlay)
+    "tech_ai":   4,           # CAPPED — builders/infra/policy, not model-release chatter
+    "science":   5,           # two deep dives (one practical, one mind-bending) + extras
+    "feature":   4,           # longform essays / interviews / podcast ideas (buzzing routes here)
+    "culture":   5,           # TV/film/music/internet that crossed into the conversation
+    "sports":    5,           # narrative arcs across leagues, concise
 }
+# cold_open (headlines scan), disagreement (one real adversarial pair), and the
+# outro are synthesized from the curated picks in generate_script, not curated
+# directly, so they are intentionally absent here.
 
-CURATOR_SYSTEM_PROMPT = """You are the EDITOR of a daily smart-but-broad podcast briefing.
+CURATOR_SYSTEM_PROMPT = """You are the EDITOR of a daily 2-hour, broadly-knowledgeable podcast briefing.
 Your ONLY job is curation, ranking, and cross-domain balance. You do NOT write dialogue.
 
 THE LISTENER
-A 28-year-old product marketing professional in AI/data. Already drowning in AI news at work.
-He wants the show to be the OPPOSITE of an AI-narrow podcast: broad, perspective-shifting, dinner-party-worthy.
-He loves: viral Twitter threads with a sharp argument, Reddit discussions with real disagreement,
-Substack essays that change his mind, podcast conversations on big ideas, weird academic studies,
-geopolitics, science, biotech breakthroughs, mainstream culture everyone is talking about,
-and COMPREHENSIVE sports coverage spanning ALL major leagues and tournaments.
-He does NOT want: enterprise SaaS, ETL/data-engineering bias, OR obscure literary essays
-from outlets like NYRB / LRB / Aeon / niche academic journals.
+A smart generalist who wants to be conversationally fluent and argument-literate across politics,
+business, economics, technology, AI, science, culture, and sports. The goal is to be able to talk
+with almost anyone about almost anything — not to go deep in one vertical. He wants to know not just
+WHAT happened but what thoughtful people are DEBATING, which cultural objects people are talking about,
+and which narratives matter. He is already saturated with AI/tech at work, so the show must be a
+DIVERSIFIED media diet, explicitly NOT dominated by AI or technology.
+He does NOT want: enterprise SaaS / ETL bias, endless model-release chatter, OR obscure literary
+essays from outlets like NYRB / LRB / Aeon / niche academic journals.
 
 YOUR JOB
-You receive ~140 candidate topics across 15 beats. Pick the BEST ones with strict cross-domain balance
-and route them to the right segment BY CONTENT, not by which beat they came from.
+You receive ~140 candidate topics across many beats. Pick the BEST ones with strict cross-domain
+balance and route them to the right segment BY CONTENT, not by which beat they came from.
 The show has these segments with target topic counts:
 {segment_targets}
 
 CONTENT ROUTING (the most important rule)
 Route topics to segments by what they ARE ABOUT, not by which beat returned them. For example:
-- A Reddit thread arguing about a soccer transfer belongs in SPORTS, not arguments.
-- A Stratechery essay about Apple's strategy belongs in TECH_BUSINESS, not arguments.
-- A Twitter thread about a new Nature paper belongs in SCIENCE, not arguments.
-- A Substack essay about geopolitics belongs in WORLD or ARGUMENTS depending on whether
-  it is the day's primary geopolitics story or a perspective piece.
-- A podcast conversation about big ideas belongs in ARGUMENTS.
-- A podcast about a specific product launch belongs in TECH_BUSINESS.
+- A major breaking US/world story belongs in HARD_NEWS.
+- A piece arguing competing views on a policy/election belongs in POLITICS.
+- A markets/macro/company/earnings story belongs in ECONOMY.
+- A builders/infra/chips/AI-policy/AI-safety story belongs in TECH_AI.
+- A new paper or mind-bending finding belongs in SCIENCE.
+- A standout longform essay, interview, or podcast idea (the day's best single argument) belongs in FEATURE.
+- A TV/film/music/internet-culture story everyone is talking about belongs in CULTURE.
+- A sports narrative (rivalry, star, standings, strategy) belongs in SPORTS.
 The `beat` tag on each item is INFORMATIONAL ONLY — cross-routing is expected and encouraged.
+
+BALANCE RULES — non-negotiable
+DAILY MINIMUMS: at least 2 substantial politics/world stories (across HARD_NEWS + POLITICS);
+at least 1 economics/business/markets story; at least 1 tech/AI story; at least 2 science stories
+when possible (one practical/near-term, one mind-bending); at least 1 substantial culture story;
+at least 1 sports narrative arc.
+DAILY CAPS — enforce these strictly:
+- TECH & AI is CAPPED. Pick at most 4 TECH_AI topics, and NO MORE THAN 3 of them may be AI stories.
+  Do not let AI/tech dominate the episode — when in doubt, cut an AI item, not a non-AI one.
+- SPORTS stays concise (≤5 topics) but engaging; spread across DIFFERENT leagues/tournaments.
+- FEATURE is ONE day's best longform argument plus a few alternates — depth over breadth.
 
 HARD RULES — non-negotiable
 - VERIFIABILITY: Every kept item must have a real working URL (`url` field non-empty). If the item
   also has a `published` date, it must be within the last 14 days. DROP fabricated/unverifiable items.
-- NO OBSCURE OUTLETS: skip items from NYRB, LRB, Aeon, Public Humanities, niche academic journals,
-  obscure literary blogs. Mainstream-prestige is fine (Atlantic, New Yorker, Stratechery, Bloomberg,
-  FT, NYT, WaPo, Economist, Reuters, AP, BBC, Vox, Substack-with-traction, named newsletters).
-- SPORTS COVERAGE: Spread the 6 sports topics ACROSS DIFFERENT LEAGUES/TOURNAMENTS. Avoid loading
-  up on just one sport. If multiple major tournaments are active (World Cup, Olympics, Grand Slam,
-  major league finals), give each a slot. Prioritize tournaments with active competition over offseason.
-- ARGUMENTS SEGMENT: This is the HEART of the show. Pull from a MIX of: X/Twitter threads, Reddit
-  discussions, Substack essays, AND podcast conversations — all four as equal first-class sources.
-  Don't pack arguments with one source type. Prefer named threads with specific authors/handles.
-- TECH_BUSINESS: 7 topics with REAL DEPTH — mix big tech moves, startup funding announcements,
-  M&A, hardware/semis, AND 2-3 frontier AI items (model releases, lab news, research). Not just headlines.
+- NO OBSCURE OUTLETS: skip NYRB, LRB, Aeon, Public Humanities, niche academic journals, obscure
+  literary blogs. Mainstream-prestige is fine (Atlantic, New Yorker, Stratechery, Bloomberg, FT, NYT,
+  WaPo, Economist, Reuters, AP, BBC, Vox, Foreign Affairs, Semafor, Politico, Substack-with-traction).
+- IDEOLOGICAL PLURALITY: for POLITICS and FEATURE, prefer a mix of institutional/mainstream reporting
+  AND serious heterodox voices from both the left and center-right. Avoid one-note framing.
 - DEDUPLICATE against recent recaps. The "RECENT EPISODES" block lists every topic phrase and
   headline covered in the last 7 days. If a candidate item refers to the SAME story, person, study,
   research finding, or company as a prior topic — even if the candidate's wording differs — DROP IT
   unless there is a CONCRETE NEW DEVELOPMENT (new data, new actor, new ruling, new price, new fix).
-  Treat this rule with maximum strictness for the COLD OPEN: never reuse anything that appeared as a
-  topic in the past 3 days as today's cold open.
   If you keep an item as an update, you MUST add an "update_note" field naming the specific new fact.
   Items WITHOUT an update_note that overlap a prior recap WILL be removed by a downstream check.
 
 RANKING CRITERIA (in order)
-1. Verifiable and recent (working URL, recent date if available)
-2. Active social/cultural buzz (the `buzz` field shows real traction)
-3. Perspective-shifting / would change a smart person's mind
-4. Specific & sourced (named author, handle, study, exact number)
-5. Cross-domain balance (the show needs variety)
-6. Conversational potential
+1. Impact: does the story matter in the real world?
+2. Conversation value: are many smart/influential people talking about it (the `buzz` field)?
+3. Diversity: does it expand the topical and ideological mix of the episode?
+4. Novelty: genuinely fresh, or framed in an original way?
+5. Narrative quality: conflict, stakes, personality, beauty, surprise, strategic intrigue?
+6. Source quality: grounded in strong reporting, thoughtful essays, or credible expert interpretation?
 
 OUTPUT FORMAT — STRICT JSON ONLY
 Return ONLY this JSON object, no prose, no fences:
 {{
   "segments": {{
-    "world":         [<pick objects>],
-    "economy":       [<pick objects>],
-    "science":       [<pick objects>],
-    "tech_business": [<pick objects>],
-    "arguments":     [<pick objects>],
-    "culture":       [<pick objects>],
-    "sports":        [<pick objects>],
-    "cutting_floor": [<pick objects>]
+    "hard_news": [<pick objects>],
+    "politics":  [<pick objects>],
+    "economy":   [<pick objects>],
+    "tech_ai":   [<pick objects>],
+    "science":   [<pick objects>],
+    "feature":   [<pick objects>],
+    "culture":   [<pick objects>],
+    "sports":    [<pick objects>]
   }},
   "editor_note": "<1-2 sentences on the day's overall vibe / theme>"
 }}
@@ -977,10 +987,10 @@ def curate_topics(research: dict[str, list[dict[str, Any]]],
                       file=sys.stderr)
         segs[k] = hydrated_list
 
-    # Soft cap: tech_business <= 9 (target is 7, allow slight overflow before trimming)
-    if len(segs.get("tech_business", [])) > 9:
-        segs["tech_business"] = segs["tech_business"][:9]
-        print("[curator] enforced tech_business soft cap (trimmed to 9)", file=sys.stderr)
+    # Hard cap: TECH_AI must not dominate. Trim to 4 (target) even if the LLM over-picks.
+    if len(segs.get("tech_ai", [])) > 4:
+        segs["tech_ai"] = segs["tech_ai"][:4]
+        print("[curator] enforced tech_ai cap (trimmed to 4)", file=sys.stderr)
 
     # URL verification — the ONLY hard filter. Date is preferred but not required.
     import datetime as _dt
@@ -1019,22 +1029,24 @@ def curate_topics(research: dict[str, list[dict[str, Any]]],
 
 # v5 fallback uses content-keyword heuristics since affinity mapping is gone.
 _FALLBACK_SEGMENT_KEYWORDS: dict[str, list[str]] = {
-    "world":         ["geopolitics", "war", "election", "diplomatic", "russia", "ukraine", "china",
-                      "israel", "iran", "summit", "sanctions", "nato", "treaty"],
-    "economy":       ["inflation", "gdp", "fed", "central bank", "jobs", "unemployment", "cpi",
-                      "rates", "yields", "treasury", "currency", "trade", "tariff", "oil", "energy"],
-    "science":       ["study", "researchers", "paper", "nature", "science", "physics", "neuroscience",
-                      "climate", "astronomy", "discovery", "experiment", "biotech", "clinical", "fda"],
-    "tech_business": ["apple", "google", "microsoft", "meta", "amazon", "nvidia", "openai", "anthropic",
-                      "deepmind", "xai", "ai", "model", "chip", "semiconductor", "startup", "funding",
-                      "raises", "series", "ipo", "acquires", "merger", "antitrust"],
-    "arguments":     ["argues", "essay", "thread", "discusses", "debate", "podcast", "interviews",
-                      "conversation", "critique", "case for", "case against"],
-    "culture":       ["movie", "film", "tv", "series", "season", "album", "song", "book", "tiktok",
-                      "viral", "netflix", "hbo", "billboard", "bestseller", "memoir"],
-    "sports":        ["nba", "nfl", "mlb", "nhl", "soccer", "football", "world cup", "euros", "champions",
-                      "tennis", "wimbledon", "grand slam", "f1", "ferrari", "olympics", "cricket", "golf",
-                      "trade", "draft", "signed", "free agent"],
+    "hard_news":  ["breaking", "killed", "attack", "war", "russia", "ukraine", "israel", "gaza",
+                   "iran", "summit", "sanctions", "nato", "treaty", "coup", "protest", "disaster"],
+    "politics":   ["election", "senate", "congress", "president", "policy", "supreme court", "ruling",
+                   "campaign", "vote", "legislation", "governor", "primary", "immigration"],
+    "economy":    ["inflation", "gdp", "fed", "central bank", "jobs", "unemployment", "cpi", "rates",
+                   "yields", "treasury", "currency", "trade", "tariff", "oil", "energy", "earnings", "ipo"],
+    "tech_ai":    ["apple", "google", "microsoft", "meta", "amazon", "nvidia", "openai", "anthropic",
+                   "deepmind", "xai", "ai", "model", "chip", "semiconductor", "startup", "funding",
+                   "raises", "acquires", "antitrust", "data center"],
+    "science":    ["study", "researchers", "paper", "nature", "science", "physics", "neuroscience",
+                   "climate", "astronomy", "discovery", "experiment", "biotech", "clinical", "fda", "space"],
+    "feature":    ["argues", "essay", "thread", "discusses", "debate", "podcast", "interviews",
+                   "conversation", "critique", "case for", "case against", "longform", "profile"],
+    "culture":    ["movie", "film", "tv", "series", "season", "album", "song", "book", "tiktok",
+                   "viral", "netflix", "hbo", "billboard", "bestseller", "memoir", "meme"],
+    "sports":     ["nba", "nfl", "mlb", "nhl", "soccer", "football", "world cup", "euros", "champions",
+                   "tennis", "wimbledon", "grand slam", "f1", "ferrari", "olympics", "cricket", "golf",
+                   "draft", "signed", "free agent"],
 }
 
 def _fallback_curate(research: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
@@ -1063,7 +1075,7 @@ def _fallback_curate(research: dict[str, list[dict[str, Any]]]) -> dict[str, Any
                 best_score = score
                 best_seg = seg_key
         if best_seg is None:
-            best_seg = "cutting_floor"
+            best_seg = "hard_news"
         key = it.get("headline","")[:80]
         if key in used:
             continue
@@ -1072,10 +1084,10 @@ def _fallback_curate(research: dict[str, list[dict[str, Any]]]) -> dict[str, Any
             used.add(key)
             segs[best_seg].append({**it, "rank": len(segs[best_seg]) + 1})
 
-    # Fill cutting_floor with leftovers
-    leftovers = [it for it in all_items if it.get("headline","")[:80] not in used][:6]
+    # Top up the feature segment with leftovers so longform has alternates.
+    leftovers = [it for it in all_items if it.get("headline","")[:80] not in used][:4]
     for it in leftovers:
-        segs["cutting_floor"].append({**it, "rank": len(segs["cutting_floor"]) + 1})
+        segs["feature"].append({**it, "rank": len(segs["feature"]) + 1})
 
     return {"segments": segs, "editor_note": "(fallback curation - LLM curator failed)"}
 
@@ -1193,13 +1205,13 @@ def programmatic_dedupe(curated: dict[str, Any],
                 )
                 continue
             if is_cold and worst_match and update_note:
-                # cold open even with update_note: kick to cutting_floor as safety
+                # cold open even with update_note: kick to feature as safety
                 pt, sim, days_ago, eo = worst_match
                 dropped_log.append(
-                    f"  [demoted cold_open→cutting_floor] '{headline[:80]}' "
+                    f"  [demoted cold_open→feature] '{headline[:80]}' "
                     f"~ '{pt[:60]}' sim={sim:.2f} {days_ago}d ago"
                 )
-                segments_out.setdefault("cutting_floor", []).append(it)
+                segments_out.setdefault("feature", []).append(it)
                 continue
             keepers.append(it)
         segments_out[seg_name] = keepers
@@ -1214,7 +1226,7 @@ def programmatic_dedupe(curated: dict[str, Any],
     # Cold-open rescue: if dedupe emptied cold_open, promote the highest-ranked
     # un-deduped item from a content segment so the writer has something fresh.
     if not segments_out.get("cold_open"):
-        for donor in ("science", "tech_business", "world", "arguments", "culture"):
+        for donor in ("hard_news", "science", "tech_ai", "feature", "culture"):
             picks = segments_out.get(donor) or []
             if picks:
                 lifted = dict(picks[0])
@@ -1386,9 +1398,18 @@ def fact_check_script(lines: list[dict[str, str]],
 SCRIPT_SEGMENT_SYSTEM_PROMPT = """You are writing one segment of a daily podcast briefing.
 
 THE SHOW
-Two hosts: Maya (analytical, curious, sharp interviewer) and Ben (skeptical, witty, contrarian energy).
-Vibe: NPR's Up First meets Hard Fork meets a smart group chat. Curious, broad, occasionally funny.
-Listener: a 28-year-old product marketing professional in tech/AI. Smart, broad interests.
+Two hosts with distinct but good-faith worldviews:
+- Maya = HOST A, the Technocratic Systems Explainer. Institutional, analytical, framework-oriented.
+  Trusts mainstream reporting and evidence/policy logic. Leads on politics, economics, business, tech
+  infrastructure, AI policy, medicine, climate, and applied science.
+- Ben = HOST B, the Heterodox Narrative Skeptic. Skeptical of consensus narratives, attuned to human
+  stories and cultural dynamics, willing to channel heterodox/contrarian-but-serious viewpoints. Leads
+  on culture, sports narratives, internet discourse, AI criticism, social impact, and mind-bending
+  science (physics, space, cognition, surprising results).
+They CHALLENGE each other, but the disagreement is intellectually serious, never performative.
+Vibe: a smart, curious, broad conversation — witty and casual by default, but able to turn sober and
+serious when the topic demands it (wars, constitutional stakes, consequential science/health).
+Listener: a smart generalist who wants to converse fluently across every domain — NOT an AI specialist.
 
 OUTPUT FORMAT — STRICT
 Return ONLY a JSON array. No prose before or after. No code fences. No commentary.
@@ -1433,6 +1454,7 @@ SEGMENT TO WRITE
 Segment: {label}
 Word target: {words} words (hit within ±15%)
 This segment's purpose: {purpose}
+Freshness rule for this segment: {freshness}
 
 RECENT EPISODES (last {lookback} days)
 ================
@@ -1449,31 +1471,50 @@ PREVIOUS SEGMENTS WRITTEN TODAY (for tone + callback continuity, do NOT repeat c
 Write this segment now per the system instructions. Cover every curated topic in roughly its ranked order. Output the JSON array only."""
 
 SEGMENT_PURPOSE = {
-    "cold_open":     "Maya & Ben banter on the day's biggest or most fun story. Set tone. Tease what's coming. ONE topic, max. Use ONLY the topic in CURATED TOPICS — do NOT pull a fresh idea from the recap memory. If CURATED TOPICS is empty, use the briefest possible open ('Big day today — let's jump in.') and move on. Do NOT include an explicit 'welcome to the briefing' — the intro tag handles that.",
-    "world":         "Geopolitics & world news. Real analysis on each topic, not wire-copy summaries. Disagree where appropriate.",
-    "economy":       "Economy & markets in plain English. Pair the watchlist movers with one macro thread. Skip filler.",
-    "science":       "Science, biotech, wild studies. Translate the finding, then 'so what?'. Curiosity over hype.",
-    "tech_business": "Tech AND business with real depth — 7 topics. Mix big tech moves (Apple/MS/Google/etc), 2-3 frontier AI items (model releases, lab news), 2-3 startup fundraises / IPO / M&A, plus hardware/semis/fintech/regulation. Cite specific outlets and newsletters.",
-    "arguments":     "The ANALYTICAL HEART of the show. If a BUZZING TOPICS — DEEP MATERIAL block appears in the research, it contains the actual source text from key X posts, essays, and podcast conversations. WALK THROUGH 3-5 buzzing topics SLOWLY: name the author/handle/publication, QUOTE specific lines or stats from their actual text, then deeply analyze — what they got right, what they missed, where you push back, what context they leave out. This should feel like two smart friends spending 12-15 minutes really chewing on substantive arguments. After the buzzing topics, briefly mention any remaining curated arguments items not in the buzzing block. Avoid drive-by name-drops — depth over breadth.",
-    "culture":       "Mainstream culture buzz — what everyone is texting about. The show with the viral finale, the song you keep hearing, the book on every reading list, the meme that broke through. Talk like two friends who both saw the thing. NO obscure literary essays.",
-    "sports":        "Comprehensive multi-league coverage — 6 topics across as many active leagues/tournaments as had real news today. World Cup / Euros / Olympics / Grand Slams get priority if active. Real narratives, not box scores. Skip pre-game speculation.",
-    "cutting_floor": "Rapid-fire one-line tease of strong runners-up. Format: 'One we cut: <thing>.' Maya & Ben alternate. Keep each item to 1-2 lines max. Do NOT tease tomorrow — signoff handles that.",
-    "signoff":       "Brief wrap. Warm goodbye. Do NOT add another intro tag.",
+    "cold_open":     "A fast cross-domain scan of the day's headlines — one crisp line each on the biggest 4-6 stories across politics, world, economy, tech, science, culture, and sports, then tease what's coming. Use ONLY the headlines in CURATED TOPICS. Keep it punchy; do NOT analyze yet. No explicit 'welcome to the briefing' — the intro tag handles that.",
+    "hard_news":     "The day's major US and world stories WITH CONTEXT, not wire copy. Maya (Host A) leads with the institutional read; Ben (Host B) presses on what's uncertain or under-covered. Explain why each story matters.",
+    "politics":      "Politics & policy with COMPETING VIEWS. Present the strongest case on each side of one or two live disputes — institutional/mainstream AND serious heterodox (left and center-right). Focus on what happened, why it matters, and how thoughtful people disagree. Maya leads the policy logic; Ben channels the heterodox skeptic.",
+    "economy":       "Economics, business & markets in plain English. The LIVE MARKETS SNAPSHOT block holds REAL Yahoo Finance prices — use those numbers verbatim, never invent any. Pair the movers with one macro or company-strategy thread. Maya (Host A) leads. Narrative and implication over ticker updates.",
+    "tech_ai":       "Tech & AI, deliberately BOUNDED. At most 3-4 stories; emphasize builders, products, infra, chips/geopolitics, and safety/labor/policy implications over model-release hype. Maya leads on infra/policy; Ben brings the hype-skeptical, critic's read. Do NOT let this run long.",
+    "science":       "Science & discovery — TWO deep dives: one practical/near-term (health, climate, applied tech — Maya leads) and one mind-bending (physics, space, neuroscience, a surprising result — Ben leads). Translate the finding, then 'so what?'. Curiosity over hype.",
+    "feature":       "The day's single best LONGFORM ARGUMENT. If a BUZZING TOPICS — DEEP MATERIAL block appears, it has the actual source text from a key essay, interview, X thread, or podcast. Spend real time on ONE or TWO: name the author/publication, QUOTE specific lines, then analyze — what they nailed, what they missed, where each host pushes back. Maya emphasizes econ/policy/tech/institutional angles; Ben emphasizes culture/psychology/society/status. Depth over breadth.",
+    "culture":       "What everyone is watching, streaming, listening to, and talking about — bias toward thrillers, buzzy shows/films, and music (house/electronic, hip-hop/rap, pop, Latin/Spanish urban). Ben (Host B) leads. Internet culture enters when it crosses into mainstream conversation. Talk like two people who actually saw the thing. NO obscure literary essays.",
+    "sports":        "Concise but vivid sports narratives across DIFFERENT leagues/tournaments — rivalries, stars, strategy, standings, stakes, historical significance. Ben leads. Assume basic familiarity; explain why this athlete/match/season MATTERS. Not stat-heavy recaps. Keep it tight.",
+    "disagreement":  "ONE real, concrete disagreement from this week — ideally two named writers/experts with directly opposing takes on the same story (use the POLITICS / FEATURE / HARD NEWS topics provided). Maya (Host A) takes the institutional side, Ben (Host B) the heterodox side, and they genuinely argue it out — serious, good-faith, not performative. Name who actually holds each view.",
+    "signoff":       "Brief warm wrap. Recap the 2-3 threads most worth remembering and tease tomorrow. Do NOT add another intro tag.",
 }
 
 # Deterministic intro lines (NOT generated each run — fixed copy for predictable transitions).
 # Inserted BEFORE the LLM-generated segment dialogue. Voiced by alternating hosts.
-# `kore` = Maya, `charon` = Ben.
+# `kore` = Maya (Host A), `charon` = Ben (Host B).
 SEGMENT_INTROS: dict[str, dict[str, str]] = {
-    "world":         {"speaker": "kore",   "text": "Alright, let's start with what's happening in the world. Geopolitics first."},
-    "economy":       {"speaker": "charon", "text": "Next up, the economy. Markets, macro, the numbers worth tracking."},
-    "science":       {"speaker": "kore",   "text": "Now into science and biotech. The findings worth knowing about this week."},
-    "tech_business": {"speaker": "charon", "text": "On to tech and business. Big moves across the industry, AI included where it actually matters."},
-    "arguments":     {"speaker": "kore",   "text": "This is the part of the show we love most. The arguments worth knowing about — the threads, essays, and conversations people are actually talking about."},
-    "culture":       {"speaker": "charon", "text": "Time for culture. What everyone is watching, reading, and arguing about right now."},
-    "sports":        {"speaker": "kore",   "text": "Quick sports detour. The narratives, not the box scores."},
-    "cutting_floor": {"speaker": "charon", "text": "Before we wrap, here's what we left on the cutting room floor — quick hits we couldn't quite fit but were too good to skip."},
-    "signoff":       {"speaker": "kore",   "text": "And that's the briefing. Here's how we're closing out."},
+    "hard_news":     {"speaker": "kore",   "text": "Let's start with the big stories — the hard news that actually moved today, with the context that makes it make sense."},
+    "politics":      {"speaker": "charon", "text": "Now into politics — and this is where we tend to disagree. Let's lay out the arguments, not just the headlines."},
+    "economy":       {"speaker": "kore",   "text": "On to the economy. Markets, macro, and the companies worth tracking — with the real numbers."},
+    "tech_ai":       {"speaker": "charon", "text": "Tech and AI now — and we're keeping this tight on purpose. The stuff that actually matters for builders and policy, not the hype cycle."},
+    "science":       {"speaker": "kore",   "text": "Science time. One thing that could change your life, and one thing that might bend your brain."},
+    "feature":       {"speaker": "charon", "text": "Here's the piece we want to really sit with today — the one argument worth chewing on."},
+    "culture":       {"speaker": "charon", "text": "Culture break. What everyone's watching, streaming, and arguing about right now."},
+    "sports":        {"speaker": "kore",   "text": "Quick sports detour — the narratives and the stakes, not the box scores."},
+    "disagreement":  {"speaker": "charon", "text": "And now the part of the show where we actually disagree. One real fight, both sides."},
+    "signoff":       {"speaker": "kore",   "text": "That's the show. Let's close it out."},
+}
+
+# Per-segment freshness windows (v8). today_preamble() supplies the actual dates;
+# this tells the writer how old material may be and to time-anchor explicitly.
+_FRESH_DEFAULT = "Prefer the last 7 days; time-anchor anything older ('earlier this week')."
+SEGMENT_FRESHNESS: dict[str, str] = {
+    "cold_open":    "Headlines must be from the last 24-36 hours.",
+    "hard_news":    "Must be from the last 24-36 hours. If older, say so plainly.",
+    "politics":     "Last 7 days. Time-anchor the originating event.",
+    "economy":      "Markets numbers are live (today). Macro/company stories from the last 24-48 hours.",
+    "tech_ai":      "Last 7 days; prefer the last 48 hours for product/launch news.",
+    "science":      "Paper releases within ~14 days. A mind-bending finding may be older ONLY if explicitly framed as resurfaced ('a 2024 result that's back in conversation because…').",
+    "feature":      "Up to 14 days old, but REQUIRE an explicit time anchor ('last weekend's Atlantic piece by…').",
+    "culture":      "Last 7 days for buzz; an ongoing show/film/album season can be older if currently airing.",
+    "sports":       "Last 7 days; a narrative arc may reference the broader season, time-anchored.",
+    "disagreement": "The disagreement should be from THIS week's stories.",
+    "signoff":      "n/a — wrap-up.",
 }
 
 
@@ -1550,19 +1591,22 @@ def _salvage_dialogue_lines(text: str) -> list[dict[str, Any]]:
 
 # Segments where empty curated_topics should produce a brief honest skip line rather than
 # hallucinated content. cold_open is included so the writer can't free-style off the recap.
-CONTENT_SEGMENTS = {"cold_open", "world", "economy", "science", "tech_business", "arguments",
-                    "culture", "sports", "cutting_floor"}
+CONTENT_SEGMENTS = {"cold_open", "hard_news", "politics", "economy", "tech_ai", "science",
+                    "feature", "culture", "sports", "disagreement"}
 
 SKIP_LINES: dict[str, list[dict[str, str]]] = {
     "cold_open": [
         {"speaker": "kore",   "text": "Big day. Lots moving — let's get into it."},
-        {"speaker": "charon", "text": "We'll jump straight to the world."},
+        {"speaker": "charon", "text": "We'll jump straight into the news."},
     ],
     "culture": [
         {"speaker": "charon", "text": "Honestly, nothing in culture jumped out at us today that everyone is talking about. We'll skip ahead rather than force it."},
     ],
     "sports": [
         {"speaker": "kore", "text": "Quiet day in sports — nothing big enough to break down. Moving on."},
+    ],
+    "disagreement": [
+        {"speaker": "charon", "text": "No sharp, clean disagreement jumped out at us in today's stories — so rather than fake a fight, we'll let it go and come back to it tomorrow."},
     ],
 }
 
@@ -1837,7 +1881,7 @@ def write_segment(seg: dict[str, Any],
     topics_block = render_curated_topics(curated_topics)
     if seg["key"] == "economy":
         topics_block = topics_block + "\n\n" + build_markets_overlay(markets)
-    if seg["key"] == "arguments" and buzzing_block:
+    if seg["key"] == "feature" and buzzing_block:
         topics_block = topics_block + "\n\n" + buzzing_block
     prior_block = compact_prior_segments(prior_segments)
 
@@ -1849,6 +1893,7 @@ def write_segment(seg: dict[str, Any],
         label=seg["label"],
         words=seg["words"],
         purpose=SEGMENT_PURPOSE.get(seg["key"], ""),
+        freshness=SEGMENT_FRESHNESS.get(seg["key"], _FRESH_DEFAULT),
         lookback=RECAP_LOOKBACK_DAYS,
         recap_block=recap_block,
         research_block=topics_block,
@@ -1904,6 +1949,21 @@ def write_segment(seg: dict[str, Any],
     return valid
 
 
+# Show order for the cold-open headline scan (one top item per content segment).
+_HEADLINE_SCAN_ORDER = ["hard_news", "politics", "economy", "tech_ai",
+                        "science", "feature", "culture", "sports"]
+
+
+def _headline_scan_topics(seg_picks: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Top curated item from each content segment, in show order — feeds the cold open."""
+    out: list[dict[str, Any]] = []
+    for k in _HEADLINE_SCAN_ORDER:
+        picks = seg_picks.get(k) or []
+        if picks:
+            out.append(picks[0])
+    return out
+
+
 def generate_script(curated: dict[str, Any],
                     markets: str,
                     recap_block: str,
@@ -1911,13 +1971,15 @@ def generate_script(curated: dict[str, Any],
                     date_str: str,
                     recaps: list[dict[str, Any]] | None = None,
                     two_pass: bool = False) -> list[dict[str, str]]:
-    # v6.1: pre-fetch deep source material for the arguments segment
-    _args_topics = (curated.get("segments") or {}).get("arguments") or []
+    # Pre-fetch deep source material for the FEATURE (longform) segment — the
+    # essays/threads/podcasts the curator routed there. X is a quote layer here,
+    # not a source of truth (the Sonar fallback handles 404'd URLs).
+    _feature_topics = (curated.get("segments") or {}).get("feature") or []
     buzzing_enriched: list[dict[str, Any]] = []
     buzzing_block_str = ""
-    if _args_topics:
+    if _feature_topics:
         try:
-            buzzing_enriched = fetch_buzzing_material(_args_topics, max_items=8)
+            buzzing_enriched = fetch_buzzing_material(_feature_topics, max_items=8)
             buzzing_block_str = render_buzzing_block(buzzing_enriched)
             # Persist for debugging/inspection
             (EPISODES_DIR / date_str).mkdir(parents=True, exist_ok=True)
@@ -1948,8 +2010,18 @@ def generate_script(curated: dict[str, Any],
             print(f"[editorial] running-thread detection failed (non-fatal): {e}", file=sys.stderr)
 
     for seg in segments:
-        topics = seg_picks.get(seg["key"], [])
-        _seg_buzz = buzzing_block_str if seg["key"] == "arguments" else ""
+        key = seg["key"]
+        if key == "cold_open":
+            # Headlines scan: the top item from each content segment, in show order.
+            topics = _headline_scan_topics(seg_picks)
+        elif key == "disagreement":
+            # Re-litigate one real disagreement drawn from the day's argument-heavy picks.
+            topics = ((seg_picks.get("politics") or [])
+                      + (seg_picks.get("feature") or [])
+                      + (seg_picks.get("hard_news") or []))
+        else:
+            topics = seg_picks.get(key, [])
+        _seg_buzz = buzzing_block_str if key == "feature" else ""
         timeline_block = ""
         if two_pass and recaps:
             try:

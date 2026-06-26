@@ -1,0 +1,103 @@
+name: v7 dry run (validation)
+
+# Manual-only validation run. Does research → curate (optionally two-pass) →
+# write → fact-check → recap, then STOPS before TTS/delivery (--skip-tts) and
+# commits nothing. Outputs are uploaded as an artifact so you can inspect the
+# curator labels and writer follow-ups without local API keys.
+#
+# Lives on the default branch so it is dispatchable, but checks out whatever
+# `branch` you pass (defaults to the v7 feature branch) and runs that code.
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch to check out and run
+        required: true
+        default: claude/tier2-tier3-v7
+      two_pass:
+        description: Enable v7 two-pass curator + editorial intelligence
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dry-run-${{ github.event.inputs.branch }}
+  cancel-in-progress: false
+
+jobs:
+  dry-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout target branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+          fetch-depth: 1
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Generate script (no TTS, no delivery)
+        env:
+          PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PODCAST_BASE_DIR: ${{ github.workspace }}
+        run: |
+          set -o pipefail
+          FLAG=""
+          if [ "${{ github.event.inputs.two_pass }}" = "true" ]; then
+            FLAG="--two-pass-curator"
+          fi
+          echo "Running: python -u podcast.py --skip-tts $FLAG"
+          python -u podcast.py --skip-tts $FLAG 2>&1 | tee run.log
+          # Sanity check: the final JSON line should report skipped_tts.
+          grep -E '^\{.*"status".*\}$' run.log | tail -1 > result.json
+          python -c "import json; r=json.load(open('result.json')); assert r['status']=='skipped_tts', r; print('dry run ok:', r)"
+
+      - name: Summarize curator labels
+        if: always()
+        run: |
+          CURATED=$(ls -t episodes/*/curated.json 2>/dev/null | head -1)
+          if [ -n "$CURATED" ]; then
+            echo "### Curator label summary ($CURATED)" >> "$GITHUB_STEP_SUMMARY"
+            python - "$CURATED" <<'PY' >> "$GITHUB_STEP_SUMMARY"
+import json, sys, collections
+data = json.load(open(sys.argv[1]))
+counts = collections.Counter()
+total = 0
+for seg, items in (data.get("segments") or {}).items():
+    for it in items or []:
+        total += 1
+        counts[it.get("status", "unlabeled")] += 1
+print(f"- total topics: {total}")
+for k, v in sorted(counts.items()):
+    print(f"- {k}: {v}")
+PY
+          else
+            echo "No curated.json produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload dry-run outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dry-run-${{ github.run_id }}
+          path: |
+            run.log
+            episodes/
+            recaps/weekly_*.json
+            recaps/monthly_*.json
+            recaps/open_threads.json
+          retention-days: 7
+          if-no-files-found: warn

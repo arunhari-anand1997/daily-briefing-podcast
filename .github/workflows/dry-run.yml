@@ -71,19 +71,7 @@ jobs:
           CURATED=$(ls -t episodes/*/curated.json 2>/dev/null | head -1)
           if [ -n "$CURATED" ]; then
             echo "### Curator label summary ($CURATED)" >> "$GITHUB_STEP_SUMMARY"
-            python - "$CURATED" <<'PY' >> "$GITHUB_STEP_SUMMARY"
-import json, sys, collections
-data = json.load(open(sys.argv[1]))
-counts = collections.Counter()
-total = 0
-for seg, items in (data.get("segments") or {}).items():
-    for it in items or []:
-        total += 1
-        counts[it.get("status", "unlabeled")] += 1
-print(f"- total topics: {total}")
-for k, v in sorted(counts.items()):
-    print(f"- {k}: {v}")
-PY
+            python -c "import json,collections; d=json.load(open('$CURATED')); c=collections.Counter(s for seg in d.get('segments',{}).values() for it in (seg or []) for s in [it.get('status','unlabeled')]); print('- total topics: %d'%sum(c.values())); print(chr(10).join('- %s: %d'%(k,v) for k,v in sorted(c.items())))" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "No curated.json produced." >> "$GITHUB_STEP_SUMMARY"
           fi

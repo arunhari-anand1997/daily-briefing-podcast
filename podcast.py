@@ -57,6 +57,7 @@ import httpx
 import memory
 import curator as curator_mod
 import editorial
+import macro as macro_mod
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
@@ -169,6 +170,17 @@ Cover wars (Russia/Ukraine, Middle East, any escalations), US/China dynamics, el
 notable diplomatic moves, sanctions, summits, treaties, coups, protests, refugee crises. Skip routine politicking.
 Focus on stories where something MATERIAL changed or was revealed. Prefer reporting from Reuters, AP, FT, NYT,
 WaPo, Bloomberg, The Economist, BBC. Real URLs published in the last 48 hours.
+Return 8-12 items.
+{BEAT_OUTPUT_INSTRUCTION}"""),
+
+    ("us_politics", f"""US DOMESTIC politics & policy from the LAST 24-72 HOURS — this is the day's
+American political reporting, NOT world news and NOT opinion essays. Cover: the White House and executive
+actions/orders, Congress (bills, votes, hearings, leadership fights, shutdown/budget fights), the Supreme
+Court and federal courts (rulings, major cases), federal agencies (Fed, DOJ, SEC, FTC, DHS, etc.), the
+2026 elections and campaigns, governors and consequential state-level moves, and major political
+controversies. Each item must be a CONCRETE development that happened on a specific recent date — name the
+date. Prefer hard reporting from NYT, WaPo, Politico, The Hill, Axios, Reuters, AP, Semafor, WSJ, NBC/CNN.
+Exclude pure punditry/opinion columns (those belong in essays). Real URLs published in the last 72 hours.
 Return 8-12 items.
 {BEAT_OUTPUT_INSTRUCTION}"""),
 
@@ -1262,25 +1274,49 @@ _NUM_CLAIM_PATTERNS = [
 ]
 
 
-# Segments where the writer is fed ground-truth Yahoo Finance prices.
-# We DO NOT fact-check these — the LLM verifier hallucinates stale prices
-# and would overwrite real data with its own bad guesses.
-_FACT_CHECK_SKIP_SEGMENTS = {"economy"}
+# We used to skip the whole economy segment from fact-check to protect the live
+# Yahoo prices — but that also shielded hallucinated MACRO claims (e.g. core PCE
+# "2.6%" when it was really 3.4%). Instead we now fact-check every segment and
+# protect only the exact ground-truth NUMBERS we injected (Yahoo prices + FRED
+# macro), so prices are safe while PCE/CPI/Fed claims still get verified.
+
+def _norm_num(tok: str) -> str:
+    """Normalize a numeric token for comparison: drop $, commas, %, sign, spaces."""
+    return re.sub(r"[^0-9.]", "", tok)
 
 
-def _extract_numeric_claims(lines: list[dict[str, str]]) -> list[tuple[int, str, str]]:
+def _ground_truth_numbers(*texts: str) -> set[str]:
+    """Normalized numbers appearing in the injected ground-truth blocks (prices/macro).
+
+    These must NOT be 'corrected' by the verifier. We only protect numbers that
+    look like real levels/values (have a decimal or are 4+ digits) to avoid
+    accidentally shielding small integers a macro claim might share.
+    """
+    protected: set[str] = set()
+    for text in texts:
+        for m in re.findall(r"\d[\d,]*(?:\.\d+)?", text or ""):
+            n = _norm_num(m)
+            if "." in n or len(n) >= 4:
+                protected.add(n)
+    return protected
+
+
+def _extract_numeric_claims(lines: list[dict[str, str]],
+                            protected: set[str] | None = None) -> list[tuple[int, str, str]]:
     """Return (line_idx, full_sentence, matched_token) for every numeric claim.
 
-    Skips segments whose numbers come from ground-truth feeds (Yahoo Finance).
+    Skips tokens whose normalized value is a protected ground-truth number (a real
+    Yahoo price or FRED macro figure we fed the writer verbatim).
     """
+    protected = protected or set()
     out: list[tuple[int, str, str]] = []
     pattern = re.compile("|".join(_NUM_CLAIM_PATTERNS), re.IGNORECASE)
     for i, ln in enumerate(lines):
-        if ln.get("segment") in _FACT_CHECK_SKIP_SEGMENTS:
-            continue
         text = ln.get("text", "")
         for m in pattern.finditer(text):
             tok = m.group(0)
+            if _norm_num(tok) in protected:
+                continue  # genuine injected price/value — don't second-guess it
             # Carve out the surrounding sentence for context
             start = max(0, text.rfind(".", 0, m.start()) + 1)
             end = text.find(".", m.end())
@@ -1291,12 +1327,17 @@ def _extract_numeric_claims(lines: list[dict[str, str]]) -> list[tuple[int, str,
 
 def fact_check_script(lines: list[dict[str, str]],
                       date_str: str,
+                      markets: str = "",
+                      macro: str = "",
                       max_claims: int = 25) -> tuple[list[dict[str, str]], list[str]]:
     """Extract numeric claims, send a batch to Sonar for verification, rewrite stale claims.
 
-    Returns (updated_lines, log_messages). Best-effort: failures are non-fatal.
+    Numbers we fed the writer as ground truth (Yahoo prices + FRED macro) are
+    protected from rewriting; everything else — including macro claims like core
+    PCE — is verified. Returns (updated_lines, log_messages). Best-effort.
     """
-    claims = _extract_numeric_claims(lines)
+    protected = _ground_truth_numbers(markets, macro)
+    claims = _extract_numeric_claims(lines, protected)
     if not claims:
         return lines, ["[fact-check] no numeric claims found"]
     # Cap to avoid token blowups; prioritize claims that look like prices/percentages
@@ -1393,6 +1434,119 @@ def fact_check_script(lines: list[dict[str, str]],
     return out_lines, log
 
 
+# ─── RECENCY AUDIT (is the news actually CURRENT?) ───────────────────────────
+# The numeric fact-check catches wrong numbers; this catches wrong TIMING — Sonar
+# routinely surfaces stale events (a months-old trade, a past election, last
+# season's title) and narrates them as if they happened "Thursday". This pass
+# verifies datable claims against live search relative to today and rewrites the
+# time framing (or softens) so nothing old masquerades as breaking.
+
+# Verbs/phrases that mark a datable, recency-sensitive event.
+_RECENCY_EVENT_RE = re.compile(
+    r"\b(won|beat|defeated|clinched|crowned|advanced|eliminated|knocked out|"
+    r"traded|signed|hired|fired|resigned|stepped down|elected|sworn in|appointed|"
+    r"launched|released|unveiled|announced|acquired|merged|filed|indicted|"
+    r"died|passed away|premiered|dropped|debuted|set a record|broke the record)\b"
+    r"|\b(today|yesterday|tonight|last night|this (?:week|morning|weekend)|"
+    r"on (?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b",
+    re.IGNORECASE)
+
+# Numbers in the live-markets/macro blocks are ground truth — don't recency-audit them.
+_RECENCY_SKIP_SEGMENTS = {"economy"}
+
+
+def _extract_recency_claims(lines: list[dict[str, str]],
+                            max_claims: int = 30) -> list[tuple[int, str]]:
+    """Return (line_idx, text) for lines asserting a datable, recency-sensitive event.
+
+    Prioritizes the segments most prone to stale events (sports/news/culture).
+    """
+    priority = {"sports": 0, "hard_news": 1, "politics": 1, "culture": 2,
+                "tech_ai": 3, "feature": 3, "science": 4}
+    cands: list[tuple[int, int, str]] = []
+    for i, ln in enumerate(lines):
+        if ln.get("is_intro") or ln.get("segment") in _RECENCY_SKIP_SEGMENTS:
+            continue
+        text = ln.get("text", "")
+        if _RECENCY_EVENT_RE.search(text):
+            cands.append((priority.get(ln.get("segment", ""), 5), i, text))
+    cands.sort(key=lambda c: c[0])
+    return [(i, t) for _, i, t in cands[:max_claims]]
+
+
+RECENCY_SYSTEM_PROMPT = """You verify whether described events are CURRENT relative to a given date.
+You will get today's date and a numbered list of statements from a news podcast. For EACH statement,
+use live web knowledge to judge when the described event actually happened.
+
+Output STRICT JSON only — no prose, no fences:
+{"verdicts": [
+  {"id": <n>, "verdict": "current" | "stale" | "unknown",
+   "actual_timing": "<when it really happened, e.g. 'April 2026' or 'unknown'>",
+   "rewrite": "<if stale: rewrite the FULL statement so the timing is accurate and explicit
+               (e.g. add 'back in April' / 'last season'); keep all other facts and the speaking
+               style identical. If current or unknown: empty string>"}
+]}
+"current" = the event happened within roughly the last 10 days of today's date.
+"stale" = it happened materially earlier but is framed as recent/just-happened.
+Be conservative: only mark "stale" when you are reasonably confident it is genuinely older."""
+
+
+def recency_audit_script(lines: list[dict[str, str]], date_str: str,
+                         max_claims: int = 30) -> tuple[list[dict[str, str]], list[str]]:
+    """Flag/rewrite stale-timing claims so old events aren't narrated as current.
+
+    Best-effort and non-fatal — mirrors fact_check_script. Returns (lines, log).
+    """
+    claims = _extract_recency_claims(lines, max_claims)
+    if not claims:
+        return lines, ["[recency] no datable event claims found"]
+    numbered = "\n".join(f"{n+1}. \"{txt}\"" for n, (_, txt) in enumerate(claims))
+    prompt = (today_preamble(dt.date.fromisoformat(date_str)) +
+              f"Today is {date_str}. Verify the timing of these statements:\n{numbered}\n\n"
+              "Return the verdicts JSON now.")
+    try:
+        raw = pplx_chat(prompt, model=RESEARCH_MODEL, max_tokens=4000,
+                        system=RECENCY_SYSTEM_PROMPT, temperature=0.1)
+    except Exception as e:  # noqa: BLE001
+        return lines, [f"[recency] verification call failed (non-fatal): {e}"]
+
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```\s*$", "", cleaned)
+    s, e = cleaned.find("{"), cleaned.rfind("}")
+    if s != -1 and e != -1:
+        cleaned = cleaned[s:e + 1]
+    try:
+        verdicts = json.loads(cleaned).get("verdicts", [])
+    except json.JSONDecodeError as ex:
+        return lines, [f"[recency] parse failed (non-fatal): {ex}"]
+
+    out_lines = [dict(l) for l in lines]
+    log: list[str] = []
+    fixed = 0
+    for v in verdicts:
+        try:
+            idx = int(v.get("id", 0)) - 1
+            if idx < 0 or idx >= len(claims):
+                continue
+            if (v.get("verdict") or "").lower() != "stale":
+                continue
+            line_idx, _ = claims[idx]
+            rewrite = (v.get("rewrite") or "").strip()
+            timing = (v.get("actual_timing") or "").strip()
+            if rewrite:
+                out_lines[line_idx]["text"] = rewrite
+            else:
+                continue
+            log.append(f"[recency] line {line_idx}: stale → re-anchored ({timing})")
+            fixed += 1
+        except Exception as ex:  # noqa: BLE001
+            log.append(f"[recency] verdict parse error: {ex}")
+    log.append(f"[recency] checked {len(claims)} event claims, re-anchored {fixed} stale")
+    return out_lines, log
+
+
 # ─── SCRIPT GENERATION (MULTI-PASS) ──────────────────────────────────────────
 
 SCRIPT_SEGMENT_SYSTEM_PROMPT = """You are writing one segment of a daily podcast briefing.
@@ -1471,7 +1625,7 @@ PREVIOUS SEGMENTS WRITTEN TODAY (for tone + callback continuity, do NOT repeat c
 Write this segment now per the system instructions. Cover every curated topic in roughly its ranked order. Output the JSON array only."""
 
 SEGMENT_PURPOSE = {
-    "cold_open":     "A fast cross-domain scan of the day's headlines — one crisp line each on the biggest 4-6 stories across politics, world, economy, tech, science, culture, and sports, then tease what's coming. Use ONLY the headlines in CURATED TOPICS. Keep it punchy; do NOT analyze yet. No explicit 'welcome to the briefing' — the intro tag handles that.",
+    "cold_open":     "A fast cross-domain scan of the stories the show ACTUALLY covers today — one crisp line each on the biggest 4-6, then tease what's coming. The CURATED TOPICS block contains the opening lines of each finished segment; summarize THOSE faithfully (same facts, same numbers — do NOT introduce different figures than the segments use). Keep it punchy; do NOT analyze yet. No explicit 'welcome to the briefing' — the intro tag handles that.",
     "hard_news":     "The day's major US and world stories WITH CONTEXT, not wire copy. Maya (Host A) leads with the institutional read; Ben (Host B) presses on what's uncertain or under-covered. Explain why each story matters.",
     "politics":      "Politics & policy with COMPETING VIEWS. Present the strongest case on each side of one or two live disputes — institutional/mainstream AND serious heterodox (left and center-right). Focus on what happened, why it matters, and how thoughtful people disagree. Maya leads the policy logic; Ben channels the heterodox skeptic.",
     "economy":       "Economics, business & markets in plain English. The LIVE MARKETS SNAPSHOT block holds REAL Yahoo Finance prices — use those numbers verbatim, never invent any. Pair the movers with one macro or company-strategy thread. Maya (Host A) leads. Narrative and implication over ticker updates.",
@@ -1543,6 +1697,37 @@ def render_curated_topics(topics: list[dict[str, Any]]) -> str:
 def build_markets_overlay(markets: str) -> str:
     """Compact markets data to feed into the economy segment alongside curated topics."""
     return f"LIVE MARKETS SNAPSHOT (use this for the markets sub-block):\n{markets}"
+
+
+def build_macro_overlay(macro: str) -> str:
+    """Ground-truth macro block (FRED) for the economy segment — real PCE/CPI/Fed/etc."""
+    return macro
+
+
+def _macro_http_get(url: str) -> str:
+    """Fetch a FRED CSV via httpx. Short timeout — FRED is blocked on some CI
+    runners, so we want to fail fast and fall back rather than stall the run."""
+    r = httpx.get(url, timeout=6.0, follow_redirects=True,
+                  headers={"User-Agent": "Mozilla/5.0 (podcast-macro)"})
+    r.raise_for_status()
+    return r.text
+
+
+def gather_macro() -> str:
+    """Real macro snapshot from FRED (best-effort, non-fatal)."""
+    print("[macro] fetching real macro data from FRED...", file=sys.stderr)
+    try:
+        snap = macro_mod.build_macro_snapshot(
+            fetch_fn=_macro_http_get, log=lambda m: print(m, file=sys.stderr))
+    except Exception as e:  # noqa: BLE001
+        print(f"[macro] FRED fetch failed (non-fatal): {e}", file=sys.stderr)
+        return ""
+    if snap:
+        n = snap.count("\n- ")
+        print(f"[macro] FRED ok — {n} series grounded", file=sys.stderr)
+    else:
+        print("[macro] no macro data (FRED unreachable) — falling back to research", file=sys.stderr)
+    return snap
 
 
 
@@ -1864,7 +2049,8 @@ def write_segment(seg: dict[str, Any],
                   editor_note: str = "",
                   buzzing_block: str = "",
                   running_threads_block: str = "",
-                  timeline_block: str = "") -> list[dict[str, str]]:
+                  timeline_block: str = "",
+                  macro: str = "") -> list[dict[str, str]]:
     """Generate one segment of dialogue from CURATED topics."""
     # Short-circuit: empty topics in a content segment — emit honest skip line
     # rather than letting the model hallucinate.
@@ -1881,6 +2067,8 @@ def write_segment(seg: dict[str, Any],
     topics_block = render_curated_topics(curated_topics)
     if seg["key"] == "economy":
         topics_block = topics_block + "\n\n" + build_markets_overlay(markets)
+        if macro:
+            topics_block = topics_block + "\n\n" + build_macro_overlay(macro)
     if seg["key"] == "feature" and buzzing_block:
         topics_block = topics_block + "\n\n" + buzzing_block
     prior_block = compact_prior_segments(prior_segments)
@@ -1964,43 +2152,63 @@ def _headline_scan_topics(seg_picks: dict[str, list[dict[str, Any]]]) -> list[di
     return out
 
 
+def _finished_show_digest(results: dict[str, list[dict[str, str]]],
+                          segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build cold-open source material from the ALREADY-WRITTEN body segments.
+
+    The cold open is a scan of what the show actually covered, so it must derive
+    from finished segments (not raw curated headlines) — otherwise the headline
+    can contradict the body (e.g. PCE "2.6%" up top vs "3.4%" in the economy
+    segment). One pseudo-topic per content segment, from its first substantive line.
+    """
+    label_by_key = {s["key"]: s["label"] for s in segments}
+    digest: list[dict[str, Any]] = []
+    for seg in segments:
+        key = seg["key"]
+        if key in ("cold_open", "signoff", "disagreement"):
+            continue
+        body = [l for l in results.get(key, []) if not l.get("is_intro")]
+        if not body:
+            continue
+        lead = next((l for l in body if len(l["text"].split()) >= 12), body[0])
+        digest.append({
+            "headline": lead["text"][:220],
+            "detail": " ".join(l["text"] for l in body[:2])[:400],
+            "beat": label_by_key.get(key, key),
+        })
+    return digest
+
+
 def generate_script(curated: dict[str, Any],
                     markets: str,
                     recap_block: str,
                     segments: list[dict[str, Any]],
                     date_str: str,
                     recaps: list[dict[str, Any]] | None = None,
-                    two_pass: bool = False) -> list[dict[str, str]]:
+                    two_pass: bool = False,
+                    macro: str = "") -> list[dict[str, str]]:
+    """Multi-pass script generation: write each body segment separately from CURATED
+    topics, THEN synthesize the cold open from the finished bodies, then assemble in
+    show order with deterministic intro lines.
+    """
     # Pre-fetch deep source material for the FEATURE (longform) segment — the
     # essays/threads/podcasts the curator routed there. X is a quote layer here,
     # not a source of truth (the Sonar fallback handles 404'd URLs).
     _feature_topics = (curated.get("segments") or {}).get("feature") or []
-    buzzing_enriched: list[dict[str, Any]] = []
     buzzing_block_str = ""
     if _feature_topics:
         try:
-            buzzing_enriched = fetch_buzzing_material(_feature_topics, max_items=8)
-            buzzing_block_str = render_buzzing_block(buzzing_enriched)
-            # Persist for debugging/inspection
+            buzzing_block_str = render_buzzing_block(fetch_buzzing_material(_feature_topics, max_items=8))
             (EPISODES_DIR / date_str).mkdir(parents=True, exist_ok=True)
             (EPISODES_DIR / date_str / "buzzing.txt").write_text(buzzing_block_str)
         except Exception as e:
             print(f"[buzz] fetch_buzzing_material FAILED (non-fatal): {e}", file=sys.stderr)
 
-    """Multi-pass script generation: write each segment separately from CURATED topics.
-
-    Before each segment (except cold_open), insert a DETERMINISTIC intro line from
-    SEGMENT_INTROS so transitions are crisp and predictable. The LLM still writes the
-    segment body — the intro is a hardcoded one-liner host handoff.
-    """
-    all_lines: list[dict[str, str]] = []
-    prior_segments: list[list[dict[str, str]]] = []
     seg_picks = curated.get("segments", {})
     editor_note = curated.get("editor_note", "")
-
-    # v7: editorial intelligence. Running threads are computed once (same for the
-    # whole episode); the story-timeline lookback is per-segment.
     _today_obj = dt.date.fromisoformat(date_str) if isinstance(date_str, str) else dt.date.today()
+
+    # v7 editorial: running threads computed once for the whole episode.
     running_block = ""
     if two_pass and recaps:
         try:
@@ -2009,46 +2217,51 @@ def generate_script(curated: dict[str, Any],
         except Exception as e:  # noqa: BLE001
             print(f"[editorial] running-thread detection failed (non-fatal): {e}", file=sys.stderr)
 
-    for seg in segments:
+    results: dict[str, list[dict[str, str]]] = {}
+
+    def _write(seg: dict[str, Any], topics: list[dict[str, Any]]) -> list[dict[str, str]]:
         key = seg["key"]
-        if key == "cold_open":
-            # Headlines scan: the top item from each content segment, in show order.
-            topics = _headline_scan_topics(seg_picks)
-        elif key == "disagreement":
-            # Re-litigate one real disagreement drawn from the day's argument-heavy picks.
-            topics = ((seg_picks.get("politics") or [])
-                      + (seg_picks.get("feature") or [])
-                      + (seg_picks.get("hard_news") or []))
-        else:
-            topics = seg_picks.get(key, [])
-        _seg_buzz = buzzing_block_str if key == "feature" else ""
         timeline_block = ""
         if two_pass and recaps:
             try:
                 timeline_block = _build_timeline_block(topics, recaps, _today_obj)
             except Exception as e:  # noqa: BLE001
-                print(f"[editorial] timeline build failed for {seg['key']} (non-fatal): {e}",
-                      file=sys.stderr)
-        lines = write_segment(seg, topics, markets, recap_block,
-                              prior_segments, date_str, editor_note,
-                              buzzing_block=_seg_buzz,
-                              running_threads_block=running_block,
-                              timeline_block=timeline_block)
+                print(f"[editorial] timeline build failed for {key} (non-fatal): {e}", file=sys.stderr)
+        # Prior context for tone continuity = bodies already written, in show order.
+        prior = [results[s["key"]] for s in segments if s["key"] in results]
+        return write_segment(seg, topics, markets, recap_block, prior, date_str,
+                             editor_note, buzzing_block=(buzzing_block_str if key == "feature" else ""),
+                             running_threads_block=running_block,
+                             timeline_block=timeline_block, macro=macro)
 
-        # Prepend a hardcoded intro line for segments that have one defined.
+    # 1) Write every body segment first (everything except the cold open).
+    for seg in segments:
+        key = seg["key"]
+        if key == "cold_open":
+            continue
+        if key == "disagreement":
+            topics = ((seg_picks.get("politics") or [])
+                      + (seg_picks.get("feature") or [])
+                      + (seg_picks.get("hard_news") or []))
+        else:
+            topics = seg_picks.get(key, [])
+        results[key] = _write(seg, topics)
+
+    # 2) Synthesize the cold open from the FINISHED bodies so it can't contradict them.
+    cold_seg = next((s for s in segments if s["key"] == "cold_open"), None)
+    if cold_seg is not None:
+        results["cold_open"] = _write(cold_seg, _finished_show_digest(results, segments))
+
+    # 3) Assemble in show order, prepending deterministic intro lines.
+    all_lines: list[dict[str, str]] = []
+    for seg in segments:
+        lines = results.get(seg["key"], [])
         intro = SEGMENT_INTROS.get(seg["key"])
         if intro and lines:
-            intro_line = {
-                "speaker": intro["speaker"],
-                "text": intro["text"],
-                "segment": seg["key"],
-                "segment_label": seg["label"],
-                "is_intro": True,
-            }
-            lines = [intro_line] + lines
-
+            all_lines.append({"speaker": intro["speaker"], "text": intro["text"],
+                              "segment": seg["key"], "segment_label": seg["label"],
+                              "is_intro": True})
         all_lines.extend(lines)
-        prior_segments.append(lines)
     return all_lines
 
 
@@ -2379,7 +2592,7 @@ def main() -> int:
     recap_block = format_recaps_for_writer(recaps)
     (work_dir / "recap_context.txt").write_text(recap_block)
 
-    print("[2/7] Wide-net research (15 beats)…", file=sys.stderr)
+    print(f"[2/7] Wide-net research ({len(BEATS)} beats)…", file=sys.stderr)
     research = gather_research()
     (work_dir / "research.json").write_text(json.dumps(research, indent=2))
     total_cands = sum(len(v) for v in research.values())
@@ -2388,6 +2601,8 @@ def main() -> int:
     print("[3/7] Markets…", file=sys.stderr)
     markets = gather_markets()
     (work_dir / "markets.txt").write_text(markets)
+    macro = gather_macro()
+    (work_dir / "macro.txt").write_text(macro)
 
     print("[4/7] Curator (rank + balance)…", file=sys.stderr)
     curated = curate_topics(research, recap_block, today)          # Pass 1: routing
@@ -2399,12 +2614,16 @@ def main() -> int:
 
     print(f"[5/7] Script ({len(segments)} segments, multi-pass)…", file=sys.stderr)
     dialogue = generate_script(curated, markets, recap_block, segments, today,
-                               recaps=recaps, two_pass=two_pass)
+                               recaps=recaps, two_pass=two_pass, macro=macro)
     print("[5/6] Fact-checking numeric claims…", file=sys.stderr)
-    dialogue, fc_log = fact_check_script(dialogue, today)
+    dialogue, fc_log = fact_check_script(dialogue, today, markets=markets, macro=macro)
     for ln in fc_log:
         print(ln, file=sys.stderr)
-    (work_dir / "fact_check.log").write_text("\n".join(fc_log))
+    print("[5b/6] Recency audit (is the news current?)…", file=sys.stderr)
+    dialogue, rec_log = recency_audit_script(dialogue, today)
+    for ln in rec_log:
+        print(ln, file=sys.stderr)
+    (work_dir / "fact_check.log").write_text("\n".join(fc_log + rec_log))
     (work_dir / "script.json").write_text(json.dumps(dialogue, indent=2))
     total_words = sum(len(line["text"].split()) for line in dialogue)
     print(f"[script] {len(dialogue)} total lines, {total_words} words "

@@ -1274,25 +1274,49 @@ _NUM_CLAIM_PATTERNS = [
 ]
 
 
-# Segments where the writer is fed ground-truth Yahoo Finance prices.
-# We DO NOT fact-check these — the LLM verifier hallucinates stale prices
-# and would overwrite real data with its own bad guesses.
-_FACT_CHECK_SKIP_SEGMENTS = {"economy"}
+# We used to skip the whole economy segment from fact-check to protect the live
+# Yahoo prices — but that also shielded hallucinated MACRO claims (e.g. core PCE
+# "2.6%" when it was really 3.4%). Instead we now fact-check every segment and
+# protect only the exact ground-truth NUMBERS we injected (Yahoo prices + FRED
+# macro), so prices are safe while PCE/CPI/Fed claims still get verified.
+
+def _norm_num(tok: str) -> str:
+    """Normalize a numeric token for comparison: drop $, commas, %, sign, spaces."""
+    return re.sub(r"[^0-9.]", "", tok)
 
 
-def _extract_numeric_claims(lines: list[dict[str, str]]) -> list[tuple[int, str, str]]:
+def _ground_truth_numbers(*texts: str) -> set[str]:
+    """Normalized numbers appearing in the injected ground-truth blocks (prices/macro).
+
+    These must NOT be 'corrected' by the verifier. We only protect numbers that
+    look like real levels/values (have a decimal or are 4+ digits) to avoid
+    accidentally shielding small integers a macro claim might share.
+    """
+    protected: set[str] = set()
+    for text in texts:
+        for m in re.findall(r"\d[\d,]*(?:\.\d+)?", text or ""):
+            n = _norm_num(m)
+            if "." in n or len(n) >= 4:
+                protected.add(n)
+    return protected
+
+
+def _extract_numeric_claims(lines: list[dict[str, str]],
+                            protected: set[str] | None = None) -> list[tuple[int, str, str]]:
     """Return (line_idx, full_sentence, matched_token) for every numeric claim.
 
-    Skips segments whose numbers come from ground-truth feeds (Yahoo Finance).
+    Skips tokens whose normalized value is a protected ground-truth number (a real
+    Yahoo price or FRED macro figure we fed the writer verbatim).
     """
+    protected = protected or set()
     out: list[tuple[int, str, str]] = []
     pattern = re.compile("|".join(_NUM_CLAIM_PATTERNS), re.IGNORECASE)
     for i, ln in enumerate(lines):
-        if ln.get("segment") in _FACT_CHECK_SKIP_SEGMENTS:
-            continue
         text = ln.get("text", "")
         for m in pattern.finditer(text):
             tok = m.group(0)
+            if _norm_num(tok) in protected:
+                continue  # genuine injected price/value — don't second-guess it
             # Carve out the surrounding sentence for context
             start = max(0, text.rfind(".", 0, m.start()) + 1)
             end = text.find(".", m.end())
@@ -1303,12 +1327,17 @@ def _extract_numeric_claims(lines: list[dict[str, str]]) -> list[tuple[int, str,
 
 def fact_check_script(lines: list[dict[str, str]],
                       date_str: str,
+                      markets: str = "",
+                      macro: str = "",
                       max_claims: int = 25) -> tuple[list[dict[str, str]], list[str]]:
     """Extract numeric claims, send a batch to Sonar for verification, rewrite stale claims.
 
-    Returns (updated_lines, log_messages). Best-effort: failures are non-fatal.
+    Numbers we fed the writer as ground truth (Yahoo prices + FRED macro) are
+    protected from rewriting; everything else — including macro claims like core
+    PCE — is verified. Returns (updated_lines, log_messages). Best-effort.
     """
-    claims = _extract_numeric_claims(lines)
+    protected = _ground_truth_numbers(markets, macro)
+    claims = _extract_numeric_claims(lines, protected)
     if not claims:
         return lines, ["[fact-check] no numeric claims found"]
     # Cap to avoid token blowups; prioritize claims that look like prices/percentages
@@ -1676,8 +1705,9 @@ def build_macro_overlay(macro: str) -> str:
 
 
 def _macro_http_get(url: str) -> str:
-    """Fetch a FRED CSV via httpx (handles gzip/redirects/TLS; proven on the runner)."""
-    r = httpx.get(url, timeout=15.0, follow_redirects=True,
+    """Fetch a FRED CSV via httpx. Short timeout — FRED is blocked on some CI
+    runners, so we want to fail fast and fall back rather than stall the run."""
+    r = httpx.get(url, timeout=6.0, follow_redirects=True,
                   headers={"User-Agent": "Mozilla/5.0 (podcast-macro)"})
     r.raise_for_status()
     return r.text
@@ -2586,7 +2616,7 @@ def main() -> int:
     dialogue = generate_script(curated, markets, recap_block, segments, today,
                                recaps=recaps, two_pass=two_pass, macro=macro)
     print("[5/6] Fact-checking numeric claims…", file=sys.stderr)
-    dialogue, fc_log = fact_check_script(dialogue, today)
+    dialogue, fc_log = fact_check_script(dialogue, today, markets=markets, macro=macro)
     for ln in fc_log:
         print(ln, file=sys.stderr)
     print("[5b/6] Recency audit (is the news current?)…", file=sys.stderr)

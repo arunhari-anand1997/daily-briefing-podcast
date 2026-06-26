@@ -42,9 +42,20 @@ def test_tech_ai_is_capped():
     assert podcast.SEGMENT_TARGET_TOPICS["tech_ai"] <= 4
 
 
-def test_markets_segment_excluded_from_factcheck():
-    # economy numbers come from Yahoo ground truth; never let the verifier touch them.
-    assert "economy" in podcast._FACT_CHECK_SKIP_SEGMENTS
+def test_ground_truth_prices_protected_macro_checked():
+    # Real Yahoo prices must be shielded; hallucinated macro must stay checkable.
+    markets = "S&P 500: 7,357.49 (-0.84%)\nBrent crude: 74.13 (-4.84%)\nNVDA: 195.74 (-4.35%)"
+    protected = podcast._ground_truth_numbers(markets)
+    assert "7357.49" in protected and "74.13" in protected and "195.74" in protected
+    lines = [
+        {"text": "The S&P 500 is 7,357.49, down 0.84% on the day.", "segment": "economy"},
+        {"text": "Core PCE rose to 2.6% year over year in May.", "segment": "economy"},
+    ]
+    claims = podcast._extract_numeric_claims(lines, protected)
+    toks = {t for _, _, t in claims}
+    # the injected price level is protected; the PCE figure is still fact-checkable
+    assert not any(podcast._norm_num(t) == "7357.49" for t in toks)
+    assert any("2.6" in t for t in toks)
 
 
 def test_content_segments_set_matches_lineup():

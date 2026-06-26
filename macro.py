@@ -119,10 +119,11 @@ def build_macro_snapshot(today: dt.date | None = None,
         try:
             obs = parse_fred_csv(fetch_fn(_FRED_CSV.format(sid=sid, cosd=cosd)))
         except Exception as e:  # noqa: BLE001
-            if log and not first_err_logged:
-                log(f"[macro] fetch failed for {sid}: {type(e).__name__}: {e}")
-                first_err_logged = True
-            continue
+            # A fetch error means FRED is unreachable (it is blocked from some
+            # CI runners). Bail immediately rather than timing out on all series.
+            if log:
+                log(f"[macro] fetch failed for {sid}: {type(e).__name__}: {e} — skipping FRED")
+            return ""
         if not obs:
             if log and not first_err_logged:
                 log(f"[macro] empty/unparseable CSV for {sid}")

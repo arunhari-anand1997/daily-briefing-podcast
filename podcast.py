@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Daily Briefing Podcast Generator (v3 — wide-net research + curator + balance)
+Daily Briefing Podcast Generator (v7 — tiered memory + two-pass curator + editorial intelligence)
 
 Pipeline:
   1. Load recent episode recaps (last 7 days) from local store
@@ -92,11 +92,12 @@ CRYPTO = ["BTC", "ETH", "SOL"]
 # How many days of recap memory to feed back to the writer
 RECAP_LOOKBACK_DAYS = 7
 
-# v7 two-pass curator + editorial intelligence (Tier 2/3). Default OFF so the
-# v6.1 path is unchanged; enable per-run with TWO_PASS_CURATOR=1 or
-# --two-pass-curator until validated on a live run, then flip the default.
+# v7 two-pass curator + editorial intelligence (Tier 2/3) is now the DEFAULT
+# path. The v6.1 single-pass behaviour remains available as a kill-switch:
+# set TWO_PASS_CURATOR=0 (or pass --no-two-pass-curator) to fall back if v7
+# ever misbehaves on the daily cron, without needing a revert.
 TWO_PASS_CURATOR_ENV = (
-    os.environ.get("TWO_PASS_CURATOR", "").strip().lower() not in ("", "0", "false", "no")
+    os.environ.get("TWO_PASS_CURATOR", "1").strip().lower() not in ("0", "false", "no")
 )
 
 # OpenAI TTS limit: 4096 chars per call. Keep chunks well under.
@@ -2239,13 +2240,15 @@ def main() -> int:
                         help="Regenerate today's recap from existing script.json")
     parser.add_argument("--from-script", action="store_true",
                         help="Skip research+curator+writer; render audio from existing script.json")
-    parser.add_argument("--two-pass-curator", action="store_true",
-                        help="Enable v7 Tier 2/3: memory-review pass, story timeline, "
-                             "running threads, weekly/monthly digests (or set TWO_PASS_CURATOR=1)")
+    parser.add_argument("--two-pass-curator", action=argparse.BooleanOptionalAction,
+                        default=TWO_PASS_CURATOR_ENV,
+                        help="v7 Tier 2/3: memory-review pass, story timeline, running "
+                             "threads, weekly/monthly digests. Default ON; use "
+                             "--no-two-pass-curator (or TWO_PASS_CURATOR=0) for v6.1.")
     args = parser.parse_args()
-    two_pass = args.two_pass_curator or TWO_PASS_CURATOR_ENV
-    if two_pass:
-        print("[v7] two-pass curator + editorial intelligence ENABLED", file=sys.stderr)
+    two_pass = args.two_pass_curator
+    print(f"[v7] two-pass curator + editorial intelligence "
+          f"{'ENABLED' if two_pass else 'DISABLED (v6.1 fallback)'}", file=sys.stderr)
 
     today = dt.date.today().isoformat()
     work_dir = EPISODES_DIR / today

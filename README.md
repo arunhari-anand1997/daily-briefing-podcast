@@ -26,13 +26,13 @@ Architecture (v6.1):
   excluded since its numbers come from Yahoo (ground truth).
 - **10 content-type segments** target ~10.4k words / ~70 minutes.
 
-### v7 — memory architecture + editorial intelligence (opt-in)
+### v7 — memory architecture + editorial intelligence (default)
 
-v7 layers a richer memory model and story-arc awareness on top of v6.1. It is
-gated behind `TWO_PASS_CURATOR=1` (or `--two-pass-curator`) and defaults **off**
-until validated on a live run; with the flag off the pipeline behaves exactly
-like v6.1. The new logic lives in three pure, unit-tested modules
-(`memory.py`, `curator.py`, `editorial.py`):
+v7 layers a richer memory model and story-arc awareness on top of v6.1 and is
+now the **default** path. It can be turned off as a kill-switch with
+`TWO_PASS_CURATOR=0` (or `--no-two-pass-curator`), which restores the exact
+v6.1 single-pass behaviour. The new logic lives in three pure, unit-tested
+modules (`memory.py`, `curator.py`, `editorial.py`):
 
 - **Tiered recap storage** — daily recaps (as before) roll up into weekly
   (`weekly_YYYY-Www.json`) and monthly (`monthly_YYYY-MM.json`) threaded
@@ -134,9 +134,9 @@ cp .env.example .env
 # fill in your values
 pip install -r requirements.txt
 set -a; source .env; set +a
-python podcast.py                              # generate full episode (v6.1)
+python podcast.py                              # generate full episode (v7 default)
 python podcast.py --skip-tts                   # dry run (~5 min, no audio)
-python podcast.py --skip-tts --two-pass-curator # dry run with v7 memory/editorial
+python podcast.py --skip-tts --no-two-pass-curator # dry run on the v6.1 fallback
 python podcast.py --from-script                # resume TTS from existing chunks
 python deliver.py --result-json result.json    # upload + email after a run
 
@@ -145,11 +145,13 @@ pip install -r requirements-dev.txt
 python -m pytest tests/ -q
 ```
 
-To validate v7, run `--skip-tts --two-pass-curator` and inspect
-`episodes/<date>/curated.json` (most topics should carry a `status` field and
-`repeat`s should be gone) and `script.json` (update segments should reference
-prior framing). Flip the default on in `podcast.py` (`TWO_PASS_CURATOR_ENV`)
-once the output looks right.
+To inspect v7 output, run a dry run and look at
+`episodes/<date>/curated.json` (most topics carry a `status` field and
+`repeat`s are dropped) and `script.json` (update segments reference prior
+framing). The same can be done in CI without local keys via the
+**"v7 dry run (validation)"** workflow (Actions → Run workflow), which uploads
+these files as an artifact. To temporarily fall back to v6.1, set
+`TWO_PASS_CURATOR=0` or pass `--no-two-pass-curator`.
 
 ## Files
 

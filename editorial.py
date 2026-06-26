@@ -47,6 +47,69 @@ def _norm_entity(e: str) -> str:
     return (e or "").strip().lower()
 
 
+_SPEAKER_NAME = {"kore": "Maya", "charon": "Ben"}
+
+
+def _clean_line(text: str) -> str:
+    """Strip bracketed stage directions ([pause] etc.) the way recap extraction does."""
+    return re.sub(r"\[[^\]]+\]", "", text or "").strip()
+
+
+def build_topic_details(dialogue: list[dict[str, Any]],
+                        curated_segments: dict[str, list[dict[str, Any]]],
+                        *, max_lines: int = 6) -> list[dict[str, Any]]:
+    """Map a finished script's lines back to the topics they covered.
+
+    For each curated topic, assign the same-segment dialogue lines whose entities
+    overlap it most (lines with no overlap fall to the segment's top topic so no
+    context is lost). Returns ``[{topic, entities, segment, narration}]`` for
+    topics that ended up with at least one line. Pure — used to enrich the daily
+    recap so future episodes can quote prior framing.
+    """
+    by_seg: dict[str, list[dict[str, Any]]] = {}
+    for ln in dialogue:
+        if ln.get("is_intro"):
+            continue
+        by_seg.setdefault(ln.get("segment", ""), []).append(ln)
+
+    details: list[dict[str, Any]] = []
+    for seg, topics in (curated_segments or {}).items():
+        seg_lines = by_seg.get(seg, [])
+        if not topics or not seg_lines:
+            continue
+        topic_ents: list[set[str]] = []
+        for t in topics:
+            ents = {_norm_entity(e) for e in (t.get("entities") or [])}
+            ents |= entity_set(f"{t.get('headline', '')} {t.get('detail', '')}")
+            ents -= _STOP_ENTITIES
+            topic_ents.append(ents)
+
+        buckets: list[list[dict[str, Any]]] = [[] for _ in topics]
+        for ln in seg_lines:
+            line_ents = entity_set(ln.get("text", ""))
+            best_i, best_ov = 0, 0
+            for i, te in enumerate(topic_ents):
+                ov = len(line_ents & te)
+                if ov > best_ov:
+                    best_ov, best_i = ov, i
+            buckets[best_i].append(ln)
+
+        for t, te, bucket in zip(topics, topic_ents, buckets):
+            narration = [
+                f"{_SPEAKER_NAME.get(l.get('speaker'), '?')}: {_clean_line(l.get('text', ''))}"
+                for l in bucket if _clean_line(l.get("text", ""))
+            ][:max_lines]
+            if not narration:
+                continue
+            details.append({
+                "topic": t.get("headline", ""),
+                "entities": sorted(te)[:12],
+                "segment": seg,
+                "narration": narration,
+            })
+    return details
+
+
 def _relative_day(date_str: str, today: dt.date) -> str:
     """Human relative-day label: 'today', 'yesterday', weekday abbr, or ISO date."""
     try:

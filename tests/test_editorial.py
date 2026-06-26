@@ -136,3 +136,51 @@ def test_format_timeline_block_renders_quote_and_instruction():
 
 def test_format_timeline_block_skips_updates_without_prior():
     assert editorial.format_timeline_block([{"topic": "x", "prior": None}]) == ""
+
+
+# ─── build_topic_details ─────────────────────────────────────────────────────
+
+def test_build_topic_details_assigns_lines_by_entity_overlap():
+    dialogue = [
+        {"speaker": "kore", "text": "Welcome back.", "segment": "world", "is_intro": True},
+        {"speaker": "kore", "text": "Macron's lead is narrowing in France.", "segment": "world"},
+        {"speaker": "charon", "text": "Le Pen smells blood.", "segment": "world"},
+        {"speaker": "kore", "text": "Meanwhile OpenAI shipped a new model.", "segment": "tech_business"},
+    ]
+    curated = {
+        "world": [{"headline": "France election", "entities": ["France", "Macron", "Le Pen"]}],
+        "tech_business": [{"headline": "OpenAI ships", "entities": ["OpenAI"]}],
+    }
+    details = editorial.build_topic_details(dialogue, curated)
+    by_seg = {d["segment"]: d for d in details}
+    assert set(by_seg) == {"world", "tech_business"}
+    # intro line excluded; two world lines captured
+    assert len(by_seg["world"]["narration"]) == 2
+    assert by_seg["world"]["narration"][0].startswith("Maya:")
+    assert "OpenAI" in by_seg["tech_business"]["narration"][0]
+
+
+def test_build_topic_details_skips_topics_with_no_lines():
+    dialogue = [{"speaker": "kore", "text": "Apple news only.", "segment": "tech_business"}]
+    curated = {"tech_business": [
+        {"headline": "Apple", "entities": ["Apple"]},
+        {"headline": "Tesla", "entities": ["Tesla"]}]}
+    details = editorial.build_topic_details(dialogue, curated)
+    # Tesla topic gets no lines -> excluded; Apple present
+    assert [d["topic"] for d in details] == ["Apple"]
+
+
+def test_build_topic_details_roundtrips_into_find_prior_narration():
+    dialogue = [
+        {"speaker": "kore", "text": "Macron's lead is narrowing.", "segment": "world"},
+        {"speaker": "charon", "text": "Le Pen smells blood.", "segment": "world"},
+    ]
+    curated = {"world": [{"headline": "France election",
+                          "entities": ["France", "Macron", "Le Pen"]}]}
+    details = editorial.build_topic_details(dialogue, curated)
+    recap = {"date": "2026-06-22", "entities": ["France", "Macron"],
+             "topic_details": details}
+    got = editorial.find_prior_narration(
+        [recap], entities={"Macron", "Le Pen"}, today=dt.date(2026, 6, 25))
+    assert got is not None and got["days_ago"] == 3
+    assert any("Macron" in ln for ln in got["narration"])

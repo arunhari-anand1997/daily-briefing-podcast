@@ -1,5 +1,5 @@
 {
-  "updated": "2026-06-26",
+  "updated": "2026-06-27",
   "threads": [
     {
       "thread_id": "venezuela_double_earthquake_2026",
@@ -14,13 +14,14 @@
     },
     {
       "thread_id": "us_iran_hostilities_sanctions_waiver_2026",
-      "label": "Interim U.S.–Iran nuclear accord gives IAEA wider access as Tehran seeks final deal and sa",
+      "label": "OpenAI launches Frontier, an enterprise platform for building and managing work-focused AI",
       "first_episode": "2026-06-26",
-      "last_episode": "2026-06-26",
+      "last_episode": "2026-06-27",
       "next_milestone": "",
       "hooks": [
         "Iran hit a commercial vessel on a UN‑escorted corridor in the Strait of Hormuz, causing the UN to pause a new maritime evacuation plan amid the ongoing U.S.–Iran hostilities we covered with war powers resolutions and sanctions waivers.",
-        "An interim U.S.–Iran nuclear accord now grants IAEA inspectors expanded access to Iranian nuclear facilities as Tehran pursues a final deal and sanctions relief, adding a diplomatic layer to the previously covered hostilities and sanctions waiver."
+        "An interim U.S.–Iran nuclear accord now grants IAEA inspectors expanded access to Iranian nuclear facilities as Tehran pursues a final deal and sanctions relief, adding a diplomatic layer to the previously covered hostilities and sanctions waiver.",
+        "continuing coverage of an ongoing story"
       ],
       "status": "developing"
     },
@@ -48,23 +49,25 @@
     },
     {
       "thread_id": "oil_markets_iran_sanctions_waiver_2026",
-      "label": "Oil prices rise toward three‑month highs as Middle East disruptions and strong summer dema",
+      "label": "Oil prices rise for a third session on OPEC+ discipline and summer demand",
       "first_episode": "2026-06-26",
-      "last_episode": "2026-06-26",
+      "last_episode": "2026-06-27",
       "next_milestone": "",
       "hooks": [
-        "Brent climbed above $89 and WTI near $86 per barrel, reversing the earlier fall in prices we covered after the Iran sanctions waiver, now driven by Middle East disruptions and strong summer demand."
+        "Brent climbed above $89 and WTI near $86 per barrel, reversing the earlier fall in prices we covered after the Iran sanctions waiver, now driven by Middle East disruptions and strong summer demand.",
+        "Oil has now logged a third straight daily gain, with Brent moving above $88 and WTI near $84 on OPEC+ discipline and strong summer demand."
       ],
       "status": "developing"
     },
     {
       "thread_id": "samsung_buyback_chip_strategy_2026",
-      "label": "Samsung plans $648 billion South Korea investment push, including massive chip expansion",
+      "label": "Samsung plans record 1,000 trillion won investment in South Korea over 10 years with massi",
       "first_episode": "2026-06-26",
-      "last_episode": "2026-06-26",
+      "last_episode": "2026-06-27",
       "next_milestone": "",
       "hooks": [
-        "Samsung is preparing a 1,000 trillion won (about $648 billion) ten‑year investment plan in South Korea, including roughly 300 trillion won for new chip fabs, building on the previously covered $58.6 billion share buyback and signaling a larger strategic expansion."
+        "Samsung is preparing a 1,000 trillion won (about $648 billion) ten‑year investment plan in South Korea, including roughly 300 trillion won for new chip fabs, building on the previously covered $58.6 billion share buyback and signaling a larger strategic expansion.",
+        "continuing coverage of an ongoing story"
       ],
       "status": "developing"
     },
@@ -92,23 +95,25 @@
     },
     {
       "thread_id": "usmnt_world_cup_group_d_2026",
-      "label": "USMNT focus on Bosnia knockout clash after Türkiye loss closes out World Cup group stage",
+      "label": "USMNT loses first World Cup game but secures knockout clash with Bosnia and Herzegovina",
       "first_episode": "2026-06-26",
-      "last_episode": "2026-06-26",
+      "last_episode": "2026-06-27",
       "next_milestone": "",
       "hooks": [
-        "Following the 3-2 loss to Türkiye, new reports describe the USMNT pivoting to their round of 16 World Cup knockout match against Bosnia and Herzegovina while still advancing as Group D winners."
+        "Following the 3-2 loss to Türkiye, new reports describe the USMNT pivoting to their round of 16 World Cup knockout match against Bosnia and Herzegovina while still advancing as Group D winners.",
+        "continuing coverage of an ongoing story"
       ],
       "status": "developing"
     },
     {
       "thread_id": "giannis_trade_rumors_2026",
-      "label": "Giannis Antetokounmpo to be traded to Miami Heat in blockbuster NBA deal, according to AP ",
+      "label": "Giannis Antetokounmpo being traded to Miami Heat in blockbuster deal",
       "first_episode": "2026-06-26",
-      "last_episode": "2026-06-26",
+      "last_episode": "2026-06-27",
       "next_milestone": "",
       "hooks": [
-        "An AP-sourced report now says Giannis Antetokounmpo is set to be traded to the Miami Heat in a blockbuster deal that would reshape the NBA landscape."
+        "An AP-sourced report now says Giannis Antetokounmpo is set to be traded to the Miami Heat in a blockbuster deal that would reshape the NBA landscape.",
+        "continuing coverage of an ongoing story"
       ],
       "status": "developing"
     }

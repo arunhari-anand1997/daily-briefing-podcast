@@ -103,6 +103,23 @@ jobs:
             find episodes -mindepth 1 -maxdepth 1 -type d -mtime +7 -exec rm -rf {} +
           fi
 
+      - name: Upload transcript artifacts (lightweight, no MP3)
+        # Always keep the script/curation/fact-check text so a run can be
+        # reviewed after the fact without the 60MB+ audio.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: transcript-${{ github.run_id }}
+          path: |
+            run.log
+            episodes/*/script.json
+            episodes/*/curated.json
+            episodes/*/markets.txt
+            episodes/*/macro.txt
+            episodes/*/fact_check.log
+          retention-days: 14
+          if-no-files-found: warn
+
       - name: Upload run log on failure
         if: failure()
         uses: actions/upload-artifact@v4

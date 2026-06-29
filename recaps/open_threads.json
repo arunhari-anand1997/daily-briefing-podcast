@@ -1,5 +1,5 @@
 {
-  "updated": "2026-06-27",
+  "updated": "2026-06-29",
   "threads": [
     {
       "thread_id": "venezuela_double_earthquake_2026",
@@ -38,12 +38,13 @@
     },
     {
       "thread_id": "us_inflation_fed_policy_2026",
-      "label": "U.S. core PCE inflation cools further in May, reinforcing expectations for Fed rate cuts t",
+      "label": "U.S. May PCE inflation slows slightly while consumer spending holds up",
       "first_episode": "2026-06-26",
-      "last_episode": "2026-06-26",
+      "last_episode": "2026-06-29",
       "next_milestone": "",
       "hooks": [
-        "New Commerce Department data show core PCE rose 0.2% in May and 2.6% year‑over‑year, indicating further cooling versus the previously covered 3.4% core PCE figure and strengthening expectations for Fed rate cuts."
+        "New Commerce Department data show core PCE rose 0.2% in May and 2.6% year‑over‑year, indicating further cooling versus the previously covered 3.4% core PCE figure and strengthening expectations for Fed rate cuts.",
+        "Adds Commerce Department detail that May core PCE rose about 0.2% month‑over‑month and roughly 2.6–2.7% year‑over‑year while consumer spending remained resilient."
       ],
       "status": "developing"
     },
@@ -61,35 +62,38 @@
     },
     {
       "thread_id": "samsung_buyback_chip_strategy_2026",
-      "label": "Samsung plans record 1,000 trillion won investment in South Korea over 10 years with massi",
+      "label": "South Korea unveiled an 800 trillion won chip-and-AI investment push centered on new Samsu",
       "first_episode": "2026-06-26",
-      "last_episode": "2026-06-27",
+      "last_episode": "2026-06-29",
       "next_milestone": "",
       "hooks": [
         "Samsung is preparing a 1,000 trillion won (about $648 billion) ten‑year investment plan in South Korea, including roughly 300 trillion won for new chip fabs, building on the previously covered $58.6 billion share buyback and signaling a larger strategic expansion.",
-        "continuing coverage of an ongoing story"
+        "continuing coverage of an ongoing story",
+        "Introduces a separate national 800 trillion won chip‑and‑AI project with new Samsung and SK Hynix fabs, complementing the previously covered 1,000 trillion won Samsung investment plan."
       ],
       "status": "developing"
     },
     {
       "thread_id": "credit_markets_volatility_2026",
-      "label": "Byrne Hobart explains why recent credit market tremors could be the start of a broader rep",
+      "label": "Byrne Hobart argues that the real risk in AI is not singularity but financial leverage and",
       "first_episode": "2026-06-26",
-      "last_episode": "2026-06-26",
+      "last_episode": "2026-06-29",
       "next_milestone": "",
       "hooks": [
-        "Byrne Hobart’s essay interprets the recent weeks of widening credit spreads and outflows from high‑yield and private credit funds we covered as potential early signs of a broader regime shift in risk pricing."
+        "Byrne Hobart’s essay interprets the recent weeks of widening credit spreads and outflows from high‑yield and private credit funds we covered as potential early signs of a broader regime shift in risk pricing.",
+        "continuing coverage of an ongoing story"
       ],
       "status": "developing"
     },
     {
       "thread_id": "house_of_the_dragon_s3_2026",
-      "label": "“House of the Dragon” Season 3 is the dominant TV conversation as the Dance of the Dragons",
+      "label": "r/television discusses whether weekly release schedules are making a comeback over binge d",
       "first_episode": "2026-06-26",
-      "last_episode": "2026-06-26",
+      "last_episode": "2026-06-29",
       "next_milestone": "",
       "hooks": [
-        "Following our mention of the Season 3 premiere, new coverage highlights that House of the Dragon has become the dominant TV conversation as the Dance of the Dragons storyline fully begins."
+        "Following our mention of the Season 3 premiere, new coverage highlights that House of the Dragon has become the dominant TV conversation as the Dance of the Dragons storyline fully begins.",
+        "continuing coverage of an ongoing story"
       ],
       "status": "developing"
     },

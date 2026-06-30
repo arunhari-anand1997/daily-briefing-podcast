@@ -433,28 +433,57 @@ def _parse_beat_json(raw: str, label: str) -> list[dict[str, Any]]:
     return items
 
 
-def gather_research() -> dict[str, list[dict[str, Any]]]:
-    """Run all wide-net research beats in parallel. Each returns a list of topic dicts."""
-    results: dict[str, list[dict[str, Any]]] = {}
+# Beats that carry the news half of the show — an empty result here guts the
+# episode, so they get extra retry rounds (a 0 here is ~always a transient Sonar
+# or JSON-parse failure, not a genuinely empty news day).
+CRITICAL_BEATS = {"geopolitics", "us_politics", "economics", "tech_news",
+                  "science", "sports", "culture_buzz"}
+
+
+def _run_one_beat(label: str, prompt: str, preamble: str) -> list[dict[str, Any]]:
+    items = _parse_beat_json(pplx_chat(preamble + prompt, RESEARCH_MODEL, 4000), label)
+    for it in items:
+        it["beat"] = label
+    return items
+
+
+def gather_research(max_retry_rounds: int = 2) -> dict[str, list[dict[str, Any]]]:
+    """Run all wide-net research beats in parallel, RETRYING any that come back empty.
+
+    A beat returning 0 items is almost always a transient API hiccup or an
+    unparseable response — not a real lack of news — so we re-run empty beats for
+    up to ``max_retry_rounds`` extra rounds. Critical news beats get the same
+    retries; without this, a bad Sonar day silently guts hard news / US politics.
+    """
     preamble = today_preamble()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
-        future_map = {
-            pool.submit(pplx_chat, preamble + prompt, RESEARCH_MODEL, 4000): label
-            for label, prompt in BEATS
-        }
-        for fut in concurrent.futures.as_completed(future_map):
-            label = future_map[fut]
-            try:
-                raw = fut.result()
-                items = _parse_beat_json(raw, label)
-                # Tag every item with its source beat for downstream curation
-                for it in items:
-                    it["beat"] = label
-                results[label] = items
-                print(f"[research] {label} ✓ {len(items)} items", file=sys.stderr)
-            except Exception as e:
-                print(f"[research] {label} FAILED: {e}", file=sys.stderr)
-                results[label] = []
+    results: dict[str, list[dict[str, Any]]] = {}
+    pending: list[tuple[str, str]] = list(BEATS)
+
+    for round_i in range(max_retry_rounds + 1):
+        if not pending:
+            break
+        if round_i:
+            labels = ", ".join(l for l, _ in pending)
+            print(f"[research] retry round {round_i} for {len(pending)} empty beat(s): {labels}",
+                  file=sys.stderr)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+            future_map = {pool.submit(_run_one_beat, label, prompt, preamble): label
+                          for label, prompt in pending}
+            for fut in concurrent.futures.as_completed(future_map):
+                label = future_map[fut]
+                try:
+                    results[label] = fut.result()
+                except Exception as e:
+                    print(f"[research] {label} FAILED: {e}", file=sys.stderr)
+                    results.setdefault(label, [])
+                print(f"[research] {label} ✓ {len(results.get(label, []))} items", file=sys.stderr)
+        # Retry whatever is still empty (critical beats first in the log).
+        pending = [(l, p) for l, p in BEATS if not results.get(l)]
+
+    still_empty = [l for l in CRITICAL_BEATS if not results.get(l)]
+    if still_empty:
+        print(f"[research] WARNING: critical beats still empty after retries: {still_empty}",
+              file=sys.stderr)
     return results
 
 
@@ -829,6 +858,23 @@ Route topics to segments by what they ARE ABOUT, not by which beat returned them
 - A TV/film/music/internet-culture story everyone is talking about belongs in CULTURE.
 - A sports narrative (rivalry, star, standings, strategy) belongs in SPORTS.
 The `beat` tag on each item is INFORMATIONAL ONLY — cross-routing is expected and encouraged.
+
+NO FORUM FILLER IN THE NEWS SEGMENTS
+Reddit / forum discussion threads and "Ask<X>" threads (e.g. r/changemyview, AskHistorians, AskAcademia)
+are NOT news and NOT political reporting. NEVER place them in HARD_NEWS or POLITICS. They may appear in
+CULTURE (if a genuinely viral internet moment) or FEATURE (if a substantive argument) — otherwise drop them.
+HARD_NEWS and POLITICS must be built from real REPORTING (named outlets, datelines), not chatter.
+
+ONGOING MAJOR STORIES GET DAILY UPDATES
+An active war, conflict, or fast-moving crisis (e.g. the ongoing Iran war / Strait of Hormuz, Ukraine)
+is the OPPOSITE of a repeat — each day it develops, give it a FRESH HARD_NEWS slot with the latest
+development, framed as continuing coverage. Do not drop a still-escalating story just because it appeared
+in a recent episode.
+
+DON'T RE-LEAD THE SAME DATA RELEASE
+A single macro release (a given month's PCE / CPI / jobs report) should be covered ONCE. If a recent
+episode already led ECONOMY with this month's inflation print, do NOT make the same print the economy
+lead again — pick a fresh economy angle (a different release, a company/sector story, a market move).
 
 BALANCE RULES — non-negotiable
 DAILY MINIMUMS: at least 2 substantial politics/world stories (across HARD_NEWS + POLITICS);
@@ -1253,6 +1299,77 @@ def programmatic_dedupe(curated: dict[str, Any],
     return curated
 
 
+# ─── NEWS FLOOR (hard_news must never be empty/filler) ───────────────────────
+# Beats that produce real reporting vs. discussion-thread filler. hard_news and
+# politics must be built from reporting, never from Reddit/forum chatter.
+_NEWS_BEATS = ["geopolitics", "us_politics", "economics", "tech_news"]
+_DISCUSSION_BEATS = {"reddit", "weird_internet"}
+MIN_HARD_NEWS = 3
+
+
+def enforce_news_floor(curated: dict[str, Any], research: dict[str, list[dict[str, Any]]],
+                       min_hard_news: int = MIN_HARD_NEWS) -> dict[str, Any]:
+    """Guarantee hard_news/politics are real reporting, never empty or forum filler.
+
+    Two failure modes seen in production: (1) research beats came back empty so
+    the curator backfilled hard_news with weak business items and politics with
+    Reddit threads; (2) the curator routed all political stories into politics and
+    left hard_news empty → a "no hard news today" skip line. This strips
+    discussion-beat filler from hard_news, tops it up from unused news-beat items,
+    and reinforces politics with real political reporting if it went empty.
+    """
+    segs = curated.setdefault("segments", {})
+    log: list[str] = []
+
+    def hl(it: dict[str, Any]) -> str:
+        return (it.get("headline") or "").strip().lower()[:80]
+
+    def placed_set() -> set[str]:
+        return {hl(it) for items in segs.values() for it in (items or []) if hl(it)}
+
+    def unused_news(beats: list[str], placed: set[str]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for beat in beats:
+            for it in research.get(beat, []) or []:
+                if hl(it) and hl(it) not in placed:
+                    out.append({**it, "beat": beat})
+        return out
+
+    # 1) hard_news: drop discussion filler, then top up from real news beats.
+    hn = [it for it in (segs.get("hard_news") or []) if it.get("beat") not in _DISCUSSION_BEATS]
+    segs["hard_news"] = hn
+    placed = placed_set()
+    if len(hn) < min_hard_news:
+        for cand in unused_news(_NEWS_BEATS, placed):
+            if len(hn) >= min_hard_news:
+                break
+            if hl(cand) in placed:
+                continue
+            hn.append(cand)
+            placed.add(hl(cand))
+        log.append(f"[news-floor] hard_news topped up to {len(hn)} from news beats")
+
+    # 2) politics: if empty or all-discussion, inject real political reporting.
+    pol = segs.get("politics") or []
+    real_pol = [it for it in pol if it.get("beat") not in _DISCUSSION_BEATS]
+    if not real_pol:
+        injected = 0
+        for cand in unused_news(["us_politics", "geopolitics"], placed_set()):
+            pol.insert(injected, cand)  # real reporting goes first, filler stays as backup
+            injected += 1
+            if injected >= 3:
+                break
+        segs["politics"] = pol
+        if injected:
+            log.append(f"[news-floor] politics reinforced with {injected} real-reporting item(s)")
+
+    if not segs.get("hard_news"):
+        log.append("[news-floor] WARNING: hard_news still empty — no news-beat items available")
+    for line in log:
+        print(line, file=sys.stderr)
+    return curated
+
+
 # ─── SCRIPT NUMERIC FACT-CHECK ───────────────────────────────────────────────
 
 _NUM_CLAIM_PATTERNS = [
@@ -1285,37 +1402,66 @@ def _norm_num(tok: str) -> str:
     return re.sub(r"[^0-9.]", "", tok)
 
 
-def _ground_truth_numbers(*texts: str) -> set[str]:
-    """Normalized numbers appearing in the injected ground-truth blocks (prices/macro).
+def _to_float(tok: str) -> float | None:
+    n = _norm_num(tok)
+    if not n or n == ".":
+        return None
+    try:
+        return float(n)
+    except ValueError:
+        return None
 
-    These must NOT be 'corrected' by the verifier. We only protect numbers that
-    look like real levels/values (have a decimal or are 4+ digits) to avoid
-    accidentally shielding small integers a macro claim might share.
+
+def _ground_truth_numbers(*texts: str) -> tuple[set[str], list[float]]:
+    """Numbers in the injected ground-truth blocks (Yahoo prices + FRED macro).
+
+    Returns (exact_set, large_floats). exact_set protects decimals/4+ digit values
+    by literal match. large_floats (values >= 10 — prices, index levels) are also
+    fuzzy-matched, because the writer rounds them ("$74" for 73.50, "$4,045" for
+    4045.30) and an exact-only check let the verifier hallucinate "corrections"
+    (it once turned real gold $4,045 into $2,300). Small numbers stay exact-only
+    so a macro % like 2.6 can't be shielded by an unrelated price.
     """
-    protected: set[str] = set()
+    exact: set[str] = set()
+    large: list[float] = []
     for text in texts:
         for m in re.findall(r"\d[\d,]*(?:\.\d+)?", text or ""):
             n = _norm_num(m)
             if "." in n or len(n) >= 4:
-                protected.add(n)
-    return protected
+                exact.add(n)
+            f = _to_float(m)
+            if f is not None and f >= 10:
+                large.append(f)
+    return exact, sorted(large)
+
+
+def _is_protected(tok: str, protected: tuple[set[str], list[float]]) -> bool:
+    exact, large = protected
+    if _norm_num(tok) in exact:
+        return True
+    f = _to_float(tok)
+    if f is not None and f >= 10:
+        # within ~1.5% of a real price/level the writer likely rounded
+        return any(abs(f - g) <= max(0.015 * g, 0.01) for g in large)
+    return False
 
 
 def _extract_numeric_claims(lines: list[dict[str, str]],
-                            protected: set[str] | None = None) -> list[tuple[int, str, str]]:
+                            protected: tuple[set[str], list[float]] | None = None
+                            ) -> list[tuple[int, str, str]]:
     """Return (line_idx, full_sentence, matched_token) for every numeric claim.
 
-    Skips tokens whose normalized value is a protected ground-truth number (a real
-    Yahoo price or FRED macro figure we fed the writer verbatim).
+    Skips tokens that match a protected ground-truth number (a real Yahoo price or
+    FRED macro figure we fed the writer), exact or — for large levels — fuzzy.
     """
-    protected = protected or set()
+    protected = protected or (set(), [])
     out: list[tuple[int, str, str]] = []
     pattern = re.compile("|".join(_NUM_CLAIM_PATTERNS), re.IGNORECASE)
     for i, ln in enumerate(lines):
         text = ln.get("text", "")
         for m in pattern.finditer(text):
             tok = m.group(0)
-            if _norm_num(tok) in protected:
+            if _is_protected(tok, protected):
                 continue  # genuine injected price/value — don't second-guess it
             # Carve out the surrounding sentence for context
             start = max(0, text.rfind(".", 0, m.start()) + 1)
@@ -1628,7 +1774,7 @@ SEGMENT_PURPOSE = {
     "cold_open":     "A fast cross-domain scan of the stories the show ACTUALLY covers today — one crisp line each on the biggest 4-6, then tease what's coming. The CURATED TOPICS block contains the opening lines of each finished segment; summarize THOSE faithfully (same facts, same numbers — do NOT introduce different figures than the segments use). Keep it punchy; do NOT analyze yet. No explicit 'welcome to the briefing' — the intro tag handles that.",
     "hard_news":     "The day's major US and world stories WITH CONTEXT, not wire copy. Maya (Host A) leads with the institutional read; Ben (Host B) presses on what's uncertain or under-covered. Explain why each story matters.",
     "politics":      "Politics & policy with COMPETING VIEWS. Present the strongest case on each side of one or two live disputes — institutional/mainstream AND serious heterodox (left and center-right). Focus on what happened, why it matters, and how thoughtful people disagree. Maya leads the policy logic; Ben channels the heterodox skeptic.",
-    "economy":       "Economics, business & markets in plain English. The LIVE MARKETS SNAPSHOT block holds REAL Yahoo Finance prices — use those numbers verbatim, never invent any. Pair the movers with one macro or company-strategy thread. Maya (Host A) leads. Narrative and implication over ticker updates.",
+    "economy":       "Economics, business & markets in plain English. The LIVE MARKETS SNAPSHOT (Yahoo) and LIVE MACRO SNAPSHOT (FRED) blocks hold the REAL, current numbers — use THOSE verbatim for prices, inflation, the Fed funds rate, unemployment, and GDP, and NEVER use a different figure from a research headline. CRITICAL on rates: derive the rate-path story from the real data — if inflation is still elevated and the Fed funds rate is being held, do NOT claim rate cuts are imminent or 'likely soon'; say plainly that the Fed is on hold / leaning hawkish if that's what the numbers show. Pair the movers with one macro or company-strategy thread; if this month's inflation print was already covered recently, lead with a different angle. Maya (Host A) leads. Narrative and implication over ticker updates.",
     "tech_ai":       "Tech & AI, deliberately BOUNDED. At most 3-4 stories; emphasize builders, products, infra, chips/geopolitics, and safety/labor/policy implications over model-release hype. Maya leads on infra/policy; Ben brings the hype-skeptical, critic's read. Do NOT let this run long.",
     "science":       "Science & discovery — TWO deep dives: one practical/near-term (health, climate, applied tech — Maya leads) and one mind-bending (physics, space, neuroscience, a surprising result — Ben leads). Translate the finding, then 'so what?'. Curiosity over hype.",
     "feature":       "The day's single best LONGFORM ARGUMENT. If a BUZZING TOPICS — DEEP MATERIAL block appears, it has the actual source text from a key essay, interview, X thread, or podcast. Spend real time on ONE or TWO: name the author/publication, QUOTE specific lines, then analyze — what they nailed, what they missed, where each host pushes back. Maya emphasizes econ/policy/tech/institutional angles; Ben emphasizes culture/psychology/society/status. Depth over breadth.",
@@ -2610,6 +2756,7 @@ def main() -> int:
         print("[4b/7] Memory review (Pass 2: new/update/repeat labels)…", file=sys.stderr)
         curated = run_two_pass_curation(curated, recap_block, recaps, today)
     curated = programmatic_dedupe(curated, recaps, today)          # hard safety net
+    curated = enforce_news_floor(curated, research)                # hard_news/politics floor
     (work_dir / "curated.json").write_text(json.dumps(curated, indent=2))
 
     print(f"[5/7] Script ({len(segments)} segments, multi-pass)…", file=sys.stderr)

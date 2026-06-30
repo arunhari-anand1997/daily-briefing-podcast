@@ -131,6 +131,46 @@ def test_update_open_threads_file_persists(monkeypatch, tmp_path):
 
 # ─── digest generation timing ────────────────────────────────────────────────
 
+def test_enforce_news_floor_fills_and_strips_reddit():
+    curated = {"segments": {
+        "hard_news": [],  # empty -> must be filled
+        "politics": [{"headline": "r/changemyview debate on X", "beat": "reddit"}],  # filler only
+    }}
+    research = {
+        "geopolitics": [{"headline": "Iran war escalates with new strikes"},
+                        {"headline": "Ukraine hits Russian refinery"}],
+        "us_politics": [{"headline": "Supreme Court rules on birthright citizenship"},
+                        {"headline": "Senate passes budget bill"}],
+        "economics": [{"headline": "Jobs report beats expectations"}],
+    }
+    out = podcast.enforce_news_floor(curated, research, min_hard_news=3)
+    hn = out["segments"]["hard_news"]
+    assert len(hn) >= 3  # floor satisfied
+    assert all(it.get("beat") != "reddit" for it in hn)  # no forum filler in hard news
+    pol = out["segments"]["politics"]
+    # politics reinforced with real reporting up front; reddit filler kept as backup
+    assert pol[0].get("beat") in ("us_politics", "geopolitics")
+    assert any(it.get("beat") == "us_politics" for it in pol)
+
+
+def test_gather_research_retries_empty_beats(monkeypatch):
+    import collections
+    calls = collections.Counter()
+
+    def fake_beat(label, prompt, preamble):
+        calls[label] += 1
+        # us_politics fails (empty) twice, then recovers; everything else is fine immediately
+        if label == "us_politics" and calls[label] < 3:
+            return []
+        return [{"headline": f"{label} story", "beat": label}]
+
+    monkeypatch.setattr(podcast, "_run_one_beat", fake_beat)
+    res = podcast.gather_research(max_retry_rounds=2)
+    assert res["us_politics"], "empty critical beat should recover after retries"
+    assert calls["us_politics"] == 3       # initial + 2 retries
+    assert calls["geopolitics"] == 1       # a beat that succeeded is not retried
+
+
 def test_maybe_generate_digests_weekly_on_sunday(monkeypatch, tmp_path):
     monkeypatch.setattr(podcast, "RECAPS_DIR", tmp_path)
     # seed a few dailies in the week of 2026-06-28 (a Sunday)

@@ -44,18 +44,26 @@ def test_tech_ai_is_capped():
 
 def test_ground_truth_prices_protected_macro_checked():
     # Real Yahoo prices must be shielded; hallucinated macro must stay checkable.
-    markets = "S&P 500: 7,357.49 (-0.84%)\nBrent crude: 74.13 (-4.84%)\nNVDA: 195.74 (-4.35%)"
+    markets = "S&P 500: 7,357.49 (-0.84%)\nGold: 4,045.30 (-3.5%)\nBrent crude: 73.50 (-4.84%)"
     protected = podcast._ground_truth_numbers(markets)
-    assert "7357.49" in protected and "74.13" in protected and "195.74" in protected
+    exact, large = protected
+    assert "7357.49" in exact and "4045.30" in exact
     lines = [
-        {"text": "The S&P 500 is 7,357.49, down 0.84% on the day.", "segment": "economy"},
+        {"text": "Gold is around $4,045 and Brent is about $74 today.", "segment": "economy"},
         {"text": "Core PCE rose to 2.6% year over year in May.", "segment": "economy"},
     ]
     claims = podcast._extract_numeric_claims(lines, protected)
-    toks = {t for _, _, t in claims}
-    # the injected price level is protected; the PCE figure is still fact-checkable
-    assert not any(podcast._norm_num(t) == "7357.49" for t in toks)
-    assert any("2.6" in t for t in toks)
+    toks = {podcast._norm_num(t) for _, _, t in claims}
+    # rounded prices ($4,045≈4045.30, $74≈73.50) are fuzzy-protected (regression: gold→$2,300)
+    assert "4045" not in toks and "74" not in toks
+    # the PCE macro figure is still fact-checkable
+    assert any("2.6" in t for _, _, t in claims)
+
+
+def test_is_protected_fuzzy_only_for_large_values():
+    exact, large = podcast._ground_truth_numbers("Gold: 4,045.30\nNasdaq change: 2.55%")
+    assert podcast._is_protected("$4,050", (exact, large))   # within 1.5% of 4045.30
+    assert not podcast._is_protected("2.6%", (exact, large)) # small macro not shielded by 2.55
 
 
 def test_content_segments_set_matches_lineup():

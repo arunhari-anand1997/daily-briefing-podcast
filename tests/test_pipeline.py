@@ -153,6 +153,22 @@ def test_enforce_news_floor_fills_and_strips_reddit():
     assert any(it.get("beat") == "us_politics" for it in pol)
 
 
+def test_curate_topics_falls_back_on_api_failure(monkeypatch):
+    # A curator API failure (e.g. 400) must NOT crash the run — fall back deterministically.
+    def boom(*a, **k):
+        raise RuntimeError("400 Bad Request")
+    monkeypatch.setattr(podcast, "pplx_chat", boom)
+    research = {
+        "geopolitics": [{"headline": "Iran war escalates with new strikes", "detail": "war", "url": "http://x"}],
+        "us_politics": [{"headline": "Senate passes major budget bill", "detail": "vote", "url": "http://y"}],
+    }
+    out = podcast.curate_topics(research, "recap-block", "2026-06-30")
+    assert "segments" in out and isinstance(out["segments"], dict)
+    # fallback routed by keyword: a war story lands in hard_news, a senate vote in politics
+    placed = {it.get("headline") for seg in out["segments"].values() for it in (seg or [])}
+    assert "Iran war escalates with new strikes" in placed
+
+
 def test_gather_research_retries_empty_beats(monkeypatch):
     import collections
     calls = collections.Counter()

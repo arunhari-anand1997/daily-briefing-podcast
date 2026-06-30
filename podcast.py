@@ -972,18 +972,28 @@ def curate_topics(research: dict[str, list[dict[str, Any]]],
     )
     system = CURATOR_SYSTEM_PROMPT.format(segment_targets=target_lines)
 
+    # The recap block is only a dedup hint here; cap it so the curator prompt stays
+    # within the model's input budget (an oversized prompt 400s and, before this
+    # fallback existed, crashed the whole run). The full block still goes to the writer.
+    recap_hint = recap_block if len(recap_block) <= 6000 else recap_block[:6000] + "\n…(truncated)"
+
     user = (
         today_preamble()
         + f"Today's date for routing/dedupe purposes: {date_str}\n\n"
         f"RECENT EPISODES (last {RECAP_LOOKBACK_DAYS} days) - use for de-dup / updates:\n"
-        f"{recap_block}\n\n"
+        f"{recap_hint}\n\n"
         f"CANDIDATE TOPIC POOL ({len(pool)} items):\n"
         f"{json.dumps(pool, ensure_ascii=False)}\n\n"
         "Curate now. Output the JSON object only."
     )
 
-    raw = pplx_chat(user, model=CURATOR_MODEL, max_tokens=8000,
-                    system=system, temperature=0.4)
+    try:
+        raw = pplx_chat(user, model=CURATOR_MODEL, max_tokens=8000,
+                        system=system, temperature=0.4)
+    except Exception as e:  # noqa: BLE001 — the show must ship even if the curator API fails
+        print(f"[curator] API call failed ({e}); using deterministic fallback curation",
+              file=sys.stderr)
+        return _fallback_curate(research)
 
     cleaned = raw.strip()
     if cleaned.startswith("```"):

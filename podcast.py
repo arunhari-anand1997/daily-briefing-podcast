@@ -1456,19 +1456,34 @@ def _is_protected(tok: str, protected: tuple[set[str], list[float]]) -> bool:
     return False
 
 
+# In the ECONOMY segment, only these macro-DATA claims get fact-checked. Everything
+# else there is a live market price/level/%-change (indexes, stocks, crypto,
+# commodities, yields) that comes from the Yahoo snapshot — the verifier can't
+# price those in real time and hallucinates "corrections" (it turned a correct 10Y
+# 4.42% into 4.53%, real BTC -2.28% into -3.6%). Leave those to Yahoo ground truth.
+_MACRO_CLAIM_RE = re.compile(
+    r"\b(inflation|pce|cpi|deflation|disinflation|unemployment|jobless|payroll|jobs? report|"
+    r"gdp|growth rate|fed funds|funds rate|rate (?:cut|hike|projection|path)|dot plot|"
+    r"median .*rate|basis points|core (?:inflation|prices)|wage growth)\b",
+    re.IGNORECASE)
+
+
 def _extract_numeric_claims(lines: list[dict[str, str]],
                             protected: tuple[set[str], list[float]] | None = None
                             ) -> list[tuple[int, str, str]]:
     """Return (line_idx, full_sentence, matched_token) for every numeric claim.
 
-    Skips tokens that match a protected ground-truth number (a real Yahoo price or
-    FRED macro figure we fed the writer), exact or — for large levels — fuzzy.
+    Skips tokens that match a protected ground-truth number (Yahoo price / FRED
+    macro), and in the ECONOMY segment only keeps claims that are about a macro
+    data release — live market prices there are Yahoo ground truth, not for the
+    verifier to second-guess.
     """
     protected = protected or (set(), [])
     out: list[tuple[int, str, str]] = []
     pattern = re.compile("|".join(_NUM_CLAIM_PATTERNS), re.IGNORECASE)
     for i, ln in enumerate(lines):
         text = ln.get("text", "")
+        is_econ = ln.get("segment") == "economy"
         for m in pattern.finditer(text):
             tok = m.group(0)
             if _is_protected(tok, protected):
@@ -1477,6 +1492,8 @@ def _extract_numeric_claims(lines: list[dict[str, str]],
             start = max(0, text.rfind(".", 0, m.start()) + 1)
             end = text.find(".", m.end())
             sent = text[start: end if end != -1 else len(text)].strip()
+            if is_econ and not _MACRO_CLAIM_RE.search(sent):
+                continue  # economy market price → leave to Yahoo, don't fact-check
             out.append((i, sent, tok))
     return out
 
@@ -1784,7 +1801,7 @@ SEGMENT_PURPOSE = {
     "cold_open":     "A fast cross-domain scan of the stories the show ACTUALLY covers today — one crisp line each on the biggest 4-6, then tease what's coming. The CURATED TOPICS block contains the opening lines of each finished segment; summarize THOSE faithfully (same facts, same numbers — do NOT introduce different figures than the segments use). Keep it punchy; do NOT analyze yet. No explicit 'welcome to the briefing' — the intro tag handles that.",
     "hard_news":     "The day's major US and world stories WITH CONTEXT, not wire copy. Maya (Host A) leads with the institutional read; Ben (Host B) presses on what's uncertain or under-covered. Explain why each story matters.",
     "politics":      "Politics & policy with COMPETING VIEWS. Present the strongest case on each side of one or two live disputes — institutional/mainstream AND serious heterodox (left and center-right). Focus on what happened, why it matters, and how thoughtful people disagree. Maya leads the policy logic; Ben channels the heterodox skeptic.",
-    "economy":       "Economics, business & markets in plain English. The LIVE MARKETS SNAPSHOT (Yahoo) and LIVE MACRO SNAPSHOT (FRED) blocks hold the REAL, current numbers — use THOSE verbatim for prices, inflation, the Fed funds rate, unemployment, and GDP, and NEVER use a different figure from a research headline. CRITICAL on rates: derive the rate-path story from the real data — if inflation is still elevated and the Fed funds rate is being held, do NOT claim rate cuts are imminent or 'likely soon'; say plainly that the Fed is on hold / leaning hawkish if that's what the numbers show. Pair the movers with one macro or company-strategy thread; if this month's inflation print was already covered recently, lead with a different angle. Maya (Host A) leads. Narrative and implication over ticker updates.",
+    "economy":       "Economics, business & markets in plain English. The LIVE MARKETS SNAPSHOT (Yahoo) and LIVE MACRO SNAPSHOT (FRED) blocks hold the REAL, current numbers — use THOSE verbatim for prices, inflation, the Fed funds rate, unemployment, and GDP, and NEVER use a different figure from a research headline. MARKET PRICES RULE: for ANY index, stock, crypto, commodity, or bond-yield number (e.g. oil/Brent, the S&P, Bitcoin, the 10-year yield), quote ONLY the LIVE MARKETS SNAPSHOT value — if a research topic cites a different price (e.g. a headline says oil is '$90' but the snapshot says $72), the headline is stale: use the snapshot's $72 and ignore the headline number. CRITICAL on rates: derive the rate-path story from the real data — if inflation is still elevated and the Fed funds rate is being held, do NOT claim rate cuts are imminent or 'likely soon'; say plainly that the Fed is on hold / leaning hawkish if that's what the numbers show. Pair the movers with one macro or company-strategy thread; if this month's inflation print was already covered recently, lead with a different angle. Maya (Host A) leads. Narrative and implication over ticker updates.",
     "tech_ai":       "Tech & AI, deliberately BOUNDED. At most 3-4 stories; emphasize builders, products, infra, chips/geopolitics, and safety/labor/policy implications over model-release hype. Maya leads on infra/policy; Ben brings the hype-skeptical, critic's read. Do NOT let this run long.",
     "science":       "Science & discovery — TWO deep dives: one practical/near-term (health, climate, applied tech — Maya leads) and one mind-bending (physics, space, neuroscience, a surprising result — Ben leads). Translate the finding, then 'so what?'. Curiosity over hype.",
     "feature":       "The day's single best LONGFORM ARGUMENT. If a BUZZING TOPICS — DEEP MATERIAL block appears, it has the actual source text from a key essay, interview, X thread, or podcast. Spend real time on ONE or TWO: name the author/publication, QUOTE specific lines, then analyze — what they nailed, what they missed, where each host pushes back. Maya emphasizes econ/policy/tech/institutional angles; Ben emphasizes culture/psychology/society/status. Depth over breadth.",

@@ -66,6 +66,22 @@ def test_is_protected_fuzzy_only_for_large_values():
     assert not podcast._is_protected("2.6%", (exact, large)) # small macro not shielded by 2.55
 
 
+def test_economy_market_prices_skipped_macro_checked():
+    import re
+    lines = [
+        {"text": "Bitcoin is down 2.3% and the 10-year yield sits at 4.42%.", "segment": "economy"},
+        {"text": "Core PCE inflation is running 3.4% year over year.", "segment": "economy"},
+        {"text": "The final score was 108-102.", "segment": "sports"},
+    ]
+    claims = podcast._extract_numeric_claims(lines)  # no ground-truth protection here
+    econ = [(i, s, t) for (i, s, t) in claims if lines[i]["segment"] == "economy"]
+    # in economy, only the macro-data sentence (PCE/inflation) is checked; crypto/yield are left alone
+    assert econ and all(re.search(r"pce|inflation", s, re.I) for _, s, _ in econ)
+    assert not any(podcast._norm_num(t) in ("2.3", "4.42") for _, _, t in econ)
+    # non-economy numbers (a sports scoreline) are still checked
+    assert any(lines[i]["segment"] == "sports" for i, _, _ in claims)
+
+
 def test_content_segments_set_matches_lineup():
     assert podcast.CONTENT_SEGMENTS == CONTENT_KEYS | {"cold_open", "disagreement"}
 

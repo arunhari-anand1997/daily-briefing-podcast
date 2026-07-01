@@ -1,0 +1,312 @@
+{
+  "threads": [
+    {
+      "thread_id": "iran-war-powers",
+      "label": "Iran War Powers Resolution",
+      "entities": [
+        "Trump",
+        "Iran",
+        "House",
+        "Senate",
+        "Mike Johnson",
+        "Democrats",
+        "Republicans",
+        "Treasury",
+        "Tehran",
+        "Washington",
+        "Reuters",
+        "IAEA",
+        "Lebanon",
+        "Israel",
+        "Hezbollah",
+        "Beirut",
+        "S&P",
+        "Nasdaq",
+        "Dow",
+        "Nvidia",
+        "Tesla",
+        "Microsoft",
+        "Alphabet",
+        "Meta",
+        "Amazon",
+        "Apple",
+        "Coinbase",
+        "Robinhood",
+        "Palantir",
+        "Bitcoin",
+        "Ether",
+        "Solana",
+        "Fed",
+        "Powell",
+        "S&P Global",
+        "Brent",
+        "WTI"
+      ],
+      "first_seen": "2026-06-23",
+      "last_seen": "2026-06-23",
+      "episodes": [
+        "2026-06-23"
+      ],
+      "summary": "House passed war powers resolution directing Trump to end Iran war; Senate advanced similar measure; Trump vowed to veto. Only appeared on one day in June 2026.",
+      "status": "dormant"
+    },
+    {
+      "thread_id": "schrodinger-cat-quantum",
+      "label": "Schrödinger Cat Quantum States",
+      "entities": [
+        "Oxford",
+        "Schrödinger",
+        "Ben",
+        "Maya",
+        "Oxford University",
+        "Schrödinger's cat"
+      ],
+      "first_seen": "2026-06-23",
+      "last_seen": "2026-06-29",
+      "episodes": [
+        "2026-06-23",
+        "2026-06-24",
+        "2026-06-29"
+      ],
+      "summary": "Oxford physicists created quantum Schrödinger cat states enabling non-binary computing and error correction. Appeared on three days in June 2026.",
+      "status": "developing"
+    },
+    {
+      "thread_id": "taiwan-strait-china",
+      "label": "Taiwan Strait China Activity",
+      "entities": [
+        "Taiwan Strait",
+        "U.K.",
+        "France",
+        "Germany",
+        "China",
+        "Beijing",
+        "Taipei",
+        "Kremlin",
+        "Russia",
+        "Minsk",
+        "NATO",
+        "Lukashenko"
+      ],
+      "first_seen": "2026-06-25",
+      "last_seen": "2026-06-29",
+      "episodes": [
+        "2026-06-25",
+        "2026-06-29"
+      ],
+      "summary": "Europe's UK, France, Germany issued joint warning on Chinese activity in Taiwan Strait. Appeared on two days in June 2026.",
+      "status": "developing"
+    },
+    {
+      "thread_id": "house-of-the-dragon",
+      "label": "House of the Dragon Season 3",
+      "entities": [
+        "House of the Dragon",
+        "Dance of the Dragons",
+        "Westeros"
+      ],
+      "first_seen": "2026-06-26",
+      "last_seen": "2026-06-30",
+      "episodes": [
+        "2026-06-26",
+        "2026-06-30"
+      ],
+      "summary": "Season 3 dominated late June TV with dragon battle premieres; mid-season episode shifted focus to logistics famine and naval blockades. Appeared on two days in June 2026.",
+      "status": "developing"
+    },
+    {
+      "thread_id": "amazon-prime-video-ads",
+      "label": "Amazon Prime Video Ads Without Refunds",
+      "entities": [
+        "ACCC",
+        "Amazon",
+        "Prime Video",
+        "Gina Cass-Gottinia",
+        "CMA",
+        "Apple",
+        "Google"
+      ],
+      "first_seen": "2026-06-23",
+      "last_seen": "2026-06-30",
+      "episodes": [
+        "2026-06-23",
+        "2026-06-30"
+      ],
+      "summary": "ACCC sued Amazon for adding ads to Prime Video without refunds; UK CMA proposed allowing app developers to steer users to cheaper payment options. Appeared on two days in June 2026.",
+      "status": "developing"
+    },
+    {
+      "thread_id": "pfas-forever-chemicals",
+      "label": "PFAS Forever Chemicals Breakdown",
+      "entities": [
+        "PFAS",
+        "UV light",
+        "Baidu",
+        "Kunlunxin",
+        "Hong Kong",
+        "Google",
+        "Meta",
+        "Gemini"
+      ],
+      "first_seen": "2026-06-29",
+      "last_seen": "2026-06-30",
+      "episodes": [
+        "2026-06-29",
+        "2026-06-30"
+      ],
+      "summary": "Chemists reported UV light alone can break down PFAS forever chemicals in water without reagents; new study revealed intense UV light destroys PFAS by generating hydrogen radicals. Appeared on two days in June 2026.",
+      "status": "developing"
+    },
+    {
+      "thread_id": "south-korea-chip-investment",
+      "label": "South Korea Chip Investment",
+      "entities": [
+        "Samsung",
+        "SK Hynix",
+        "South Korea",
+        "Gwangju",
+        "South Jeolla",
+        "Lee Jae-myung"
+      ],
+      "first_seen": "2026-06-26",
+      "last_seen": "2026-06-29",
+      "episodes": [
+        "2026-06-26",
+        "2026-06-29"
+      ],
+      "summary": "Samsung announced decade investment plan for chips and batteries; Samsung and SK Hynix committed 800 trillion won to build four new chip fabs. Appeared on two days in June 2026.",
+      "status": "developing"
+    },
+    {
+      "thread_id": "pce-inflation-fed",
+      "label": "PCE Inflation and Fed Rate Cuts",
+      "entities": [
+        "Fed",
+        "Federal Reserve",
+        "PCE",
+        "Commerce Department",
+        "GDP",
+        "S&P 500",
+        "Nasdaq",
+        "VIX",
+        "10-year Treasury"
+      ],
+      "first_seen": "2026-06-23",
+      "last_seen": "2026-06-30",
+      "episodes": [
+        "2026-06-23",
+        "2026-06-25",
+        "2026-06-26",
+        "2026-06-29",
+        "2026-06-30"
+      ],
+      "summary": "Fed's core PCE inflation rose 3.4% in May, complicating rate cut arguments; later cooled to 0.2% monthly signaling soft landing. Appeared on five days in June 2026.",
+      "status": "developing"
+    },
+    {
+      "thread_id": "tps-haitians-syrians",
+      "label": "TPS for Haitians and Syrians",
+      "entities": [
+        "Supreme Court",
+        "Trump administration",
+        "Temporary Protected Status",
+        "TPS",
+        "Haitians",
+        "Syrians",
+        "DHS",
+        "Department of Homeland Security",
+        "Mullin v. Doe",
+        "Trump v. Miot",
+        "Haitian Bridge Alliance",
+        "S.4814"
+      ],
+      "first_seen": "2026-06-29",
+      "last_seen": "2026-06-29",
+      "episodes": [
+        "2026-06-29"
+      ],
+      "summary": "Supreme Court allowed Trump to terminate TPS for 350,000 Haitians and 6,000 Syrians; ruling barred judicial review of DHS decisions. Only appeared on one day in June 2026.",
+      "status": "dormant"
+    }
+  ],
+  "closed_stories": [
+    "Venezuela twin earthquakes kill 188 and injure 4000",
+    "Zimbabwe Senate delays presidential election to extend Mnangagwa tenure",
+    "USMNT loses 3-2 to Turkey in stoppage time despite winning World Cup Group D",
+    "NBA trade sends Giannis Antetokounmpo and Bobby Portis to Miami Heat",
+    "Japanese yen slips past 165 per dollar raising Bank of Japan concerns",
+    "Meituan trains trillion parameter LongCat model on domestic Chinese AI chips"
+  ],
+  "single_day_stories": [
+    "House passes war powers resolution directing Trump to end Iran war",
+    "Trump vows to veto resolution calling it meaningless amid ongoing Iran hostilities",
+    "Senate advances similar war powers measure but final vote not yet scheduled",
+    "Treasury issues 60-day sanctions waiver on Iranian oil transactions as leverage tool",
+    "Iran denies agreeing to nuclear inspections while U.S. claims confidence-building deal",
+    "Lebanon-Israel talks overshadowed by Iran folding border issues into wider negotiations",
+    "Oil prices fall after sanctions waiver signals possible de-escalation in Middle East",
+    "S&P and Nasdaq dip slightly as traders trim AI and EV risk ahead of Fed meeting",
+    "Existing home sales slip 0.7% in May despite median price hitting record $422,600",
+    "Manufacturing PMI expands to 51.0 while services cool to 52.1 in June flash data",
+    "High-yield bond spreads widen to 420 basis points as investors pull $2B from junk funds",
+    "Oxford physicists create quantum Schrödinger cat state with both cat and box fully quantum",
+    "Oxford physicists create new Schrödinger cat states with nonclassical components",
+    "Quantum cat states enable non-binary computing and better error correction",
+    "China expands extraterritorial repression under new ethnic unity law",
+    "Benny Gantz exits Israel war cabinet shifting coalition toward hardliners",
+    "Russia escalates Kharkiv strikes while Ukraine probes Belgorod border",
+    "Australia H5N1 cases trigger Papua New Guinea poultry import suspension",
+    "May CPI shows 0.5% monthly rise with core inflation only 0.2% monthly",
+    "Samsung launches 58.6 billion dollar share buyback tied to wage deal",
+    "ByteDance seeks 20 billion dollar offshore loan amid US regulatory stress",
+    "Agility Robotics goes public via SPAC merger at 2.5 billion valuation",
+    "New enzyme cement sequesters 120 kg CO2 per ton instead of emitting",
+    "Anthropic launches persistent AI agent inside Slack for team collaboration",
+    "JWST detects oxygen and neon in primordial galaxies 300-500 million years post-Big Bang",
+    "Europe's UK, France, Germany issue joint warning on Chinese activity in Taiwan Strait",
+    "Kremlin denies pressuring Belarus to open new front in Ukraine war amid NATO fears",
+    "Israeli raid in West Bank kills Palestinian man, adding to rising lethal operations since October",
+    "UAW monitor accuses union president Shawn Fain of retaliation and favoritism toward fiancée",
+    "IBM unveils sub-1 nanometer chip technology at 0.7nm node with 100 billion transistors",
+    "OpenAI launches custom inference chip Jalapeño and signs $10 billion Cerebras compute deal",
+    "EU designates Amazon and Microsoft cloud units as gatekeepers under Big Tech framework",
+    "Amazon plans $15 billion investment in India for AI and cloud infrastructure by 2030",
+    "Adobe acquires Topaz Labs to integrate AI image enhancement tools into Creative Cloud",
+    "Micron overtakes Meta and Tesla in market value driven by high-bandwidth memory demand for AI",
+    "Venezuela twin earthquakes kill 188 and injure 4000 in Caracas and La Guaira",
+    "USGS predicts death toll could exceed 10000 as 49000 people remain missing",
+    "Venezuela declares state of emergency and closes Caracas airport after quakes",
+    "International aid flows from Canada and UN as Starlink restores communications",
+    "Venezuela oil infrastructure spared despite massive building collapses and rubble",
+    "Zimbabwe Senate delays presidential election to extend Mnangagwa tenure by two years",
+    "Fed core PCE inflation cools to 0.2 percent monthly and 2.6 percent yearly in May",
+    "Samsung announces 1000 trillion won decade investment plan for chips and batteries",
+    "NASA detects Kelvin wave pulse of warm water signaling potential new El Niño event",
+    "Matt Yglesias argues high immigration is secret sauce for American economic dynamism",
+    "House of the Dragon Season 3 dominates late June TV with dragon battle premieres",
+    "USMNT loses 3-2 to Turkey in stoppage time despite winning World Cup Group D",
+    "Supreme Court 6-3 ruling allows Trump to terminate TPS for 350,000 Haitians and 6,000 Syrians",
+    "Ruling bars judicial review of DHS decisions on terminating Temporary Protected Status designations",
+    "Immigrant advocates warn of deportation risk and loss of work authorization for TPS holders",
+    "Legal precedent could shield future DHS political or sloppy TPS decisions from court challenges",
+    "Congress urged to pass legalization bill S.4814 for long-term TPS holders from Haiti and Syria",
+    "Federal appeals court blocks Trump EPA from scrapping stricter Biden-era soot standard for PM2.5",
+    "May PCE data shows headline inflation at 4.1% and core at 3.4%, complicating soft-landing narrative",
+    "Samsung and SK Hynix commit 800 trillion won to build four new chip fabs in South Korea",
+    "Chemists report UV light alone can break down PFAS forever chemicals in water without reagents",
+    "Oxford researchers expand Schrödinger cat states with nonclassical components for quantum error correction",
+    "France, Germany, UK jointly warn China over Taiwan Strait activity in geopolitical backdrop",
+    "Kremlin denies pressuring Belarus to open new Ukraine front despite strategic tremors in war",
+    "ACCC sues Amazon for adding ads to Prime Video without refunds for over one million subscribers",
+    "Amazon allegedly used five unfair contract clauses to unilaterally degrade service since late 2023",
+    "UK CMA proposes allowing app developers to steer users to cheaper payment options outside Apple and Google",
+    "South Korea formalizes 576 trillion won national AI plan as survival strategy against US and China",
+    "May core PCE inflation drops to 0.3 percent monthly signaling classic soft landing for US economy",
+    "NBA trade sends Giannis Antetokounmpo and Bobby Portis to Miami Heat for Tyler Herro and picks",
+    "New study reveals intense UV light destroys PFAS forever chemicals by generating hydrogen radicals in water",
+    "House of the Dragon mid-season episode shifts focus from dragons to logistics famine and naval blockades",
+    "Japanese yen slips past 165 per dollar raising concerns about Bank of Japan intervention tolerance",
+    "Meituan trains trillion parameter LongCat model entirely on 50000 domestic Chinese AI chips without Nvidia"
+  ],
+  "month": "2026-06"
+}

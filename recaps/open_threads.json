@@ -1,5 +1,5 @@
 {
-  "updated": "2026-06-30",
+  "updated": "2026-07-01",
   "threads": [
     {
       "thread_id": "venezuela_double_earthquake_2026",
@@ -14,9 +14,9 @@
     },
     {
       "thread_id": "us_iran_hostilities_sanctions_waiver_2026",
-      "label": "OpenAI launches Frontier, an enterprise platform for building and managing work-focused AI",
+      "label": "US and Iran pause cross‑border strikes but remain divided over next steps in talks as regi",
       "first_episode": "2026-06-26",
-      "last_episode": "2026-06-27",
+      "last_episode": "2026-07-01",
       "next_milestone": "",
       "hooks": [
         "Iran hit a commercial vessel on a UN‑escorted corridor in the Strait of Hormuz, causing the UN to pause a new maritime evacuation plan amid the ongoing U.S.–Iran hostilities we covered with war powers resolutions and sanctions waivers.",
@@ -27,9 +27,9 @@
     },
     {
       "thread_id": "russia_ukraine_war_2026",
-      "label": "European Union moves to extend temporary protection for millions of Ukrainian refugees",
+      "label": "Russia launches major missile and drone barrage across Ukraine as Poland warns of intensif",
       "first_episode": "2026-06-26",
-      "last_episode": "2026-06-26",
+      "last_episode": "2026-07-01",
       "next_milestone": "",
       "hooks": [
         "continuing coverage of an ongoing story"
@@ -38,9 +38,9 @@
     },
     {
       "thread_id": "us_inflation_fed_policy_2026",
-      "label": "Hydrogen radicals driven by intense UV light rapidly break down stubborn PFAS ‘forever che",
+      "label": "Federal Reserve signals it is likely to keep rates unchanged in July as inflation progress",
       "first_episode": "2026-06-26",
-      "last_episode": "2026-06-30",
+      "last_episode": "2026-07-01",
       "next_milestone": "",
       "hooks": [
         "New Commerce Department data show core PCE rose 0.2% in May and 2.6% year‑over‑year, indicating further cooling versus the previously covered 3.4% core PCE figure and strengthening expectations for Fed rate cuts.",
@@ -53,13 +53,14 @@
     },
     {
       "thread_id": "oil_markets_iran_sanctions_waiver_2026",
-      "label": "Oil prices rise for a third session on OPEC+ discipline and summer demand",
+      "label": "Oil prices climb above $90 a barrel on renewed Middle East supply concerns",
       "first_episode": "2026-06-26",
-      "last_episode": "2026-06-27",
+      "last_episode": "2026-07-01",
       "next_milestone": "",
       "hooks": [
         "Brent climbed above $89 and WTI near $86 per barrel, reversing the earlier fall in prices we covered after the Iran sanctions waiver, now driven by Middle East disruptions and strong summer demand.",
-        "Oil has now logged a third straight daily gain, with Brent moving above $88 and WTI near $84 on OPEC+ discipline and strong summer demand."
+        "Oil has now logged a third straight daily gain, with Brent moving above $88 and WTI near $84 on OPEC+ discipline and strong summer demand.",
+        "continuing coverage of an ongoing story"
       ],
       "status": "developing"
     },
@@ -78,9 +79,9 @@
     },
     {
       "thread_id": "credit_markets_volatility_2026",
-      "label": "Byrne Hobart argues that the real risk in AI is not singularity but financial leverage and",
+      "label": "Matt Yglesias defends continued high immigration to the U.S. even as housing and infrastru",
       "first_episode": "2026-06-26",
-      "last_episode": "2026-06-29",
+      "last_episode": "2026-07-01",
       "next_milestone": "",
       "hooks": [
         "Byrne Hobart’s essay interprets the recent weeks of widening credit spreads and outflows from high‑yield and private credit funds we covered as potential early signs of a broader regime shift in risk pricing.",
@@ -102,9 +103,9 @@
     },
     {
       "thread_id": "usmnt_world_cup_group_d_2026",
-      "label": "USMNT loses first World Cup game but secures knockout clash with Bosnia and Herzegovina",
+      "label": "USA defeats Australia 2–0 to clinch a place in the knockout stage of the 2026 FIFA World C",
       "first_episode": "2026-06-26",
-      "last_episode": "2026-06-27",
+      "last_episode": "2026-07-01",
       "next_milestone": "",
       "hooks": [
         "Following the 3-2 loss to Türkiye, new reports describe the USMNT pivoting to their round of 16 World Cup knockout match against Bosnia and Herzegovina while still advancing as Group D winners.",

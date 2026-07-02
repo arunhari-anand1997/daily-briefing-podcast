@@ -63,6 +63,19 @@ def test_extract_recency_claims_skips_intro_and_economy():
     assert [i for i, _ in claims] == [2]
 
 
+def test_extract_recency_claims_catches_legislative_and_temporal():
+    # regression: the July 2 "One Big Beautiful Bill" line was NOT flagged (extractor gap)
+    lines = [
+        {"text": "Late Wednesday, House Republicans muscled through the One Big Beautiful Bill.",
+         "segment": "hard_news"},
+        {"text": "The Senate passed the measure overnight after an all-night session.",
+         "segment": "politics"},
+        {"text": "A federal court struck down the rule earlier this week.", "segment": "politics"},
+    ]
+    claims = podcast._extract_recency_claims(lines)
+    assert len(claims) == 3  # all three now extracted for verification
+
+
 def test_extract_recency_claims_prioritizes_sports_first():
     lines = [
         {"text": "A new study was released this week on longevity.", "segment": "science"},

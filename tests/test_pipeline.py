@@ -169,6 +169,33 @@ def test_curate_topics_falls_back_on_api_failure(monkeypatch):
     assert "Iran war escalates with new strikes" in placed
 
 
+def test_currency_check_drops_stale_anniversary_item(monkeypatch):
+    curated = {"segments": {"hard_news": [
+        {"headline": "House passes One Big Beautiful Bill after all-night session", "detail": "..."},
+        {"headline": "Russia launches major barrage on Ukraine", "detail": "..."},
+    ]}}
+
+    def fake_chat(*a, **k):
+        return json.dumps({"items": [
+            {"id": 1, "verdict": "stale", "actually_happened": "July 2025",
+             "reason": "the bill passed a year ago; this is the anniversary"},
+            {"id": 2, "verdict": "recent", "actually_happened": "last few days", "reason": "ongoing war"},
+        ]})
+
+    monkeypatch.setattr(podcast, "pplx_chat", fake_chat)
+    out = podcast.currency_check_news(curated, "2026-07-02")
+    heads = [it["headline"] for it in out["segments"]["hard_news"]]
+    assert "House passes One Big Beautiful Bill after all-night session" not in heads  # dropped
+    assert "Russia launches major barrage on Ukraine" in heads                          # kept
+
+
+def test_currency_check_non_fatal_on_api_error(monkeypatch):
+    curated = {"segments": {"hard_news": [{"headline": "Some story", "detail": "x"}]}}
+    monkeypatch.setattr(podcast, "pplx_chat", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    out = podcast.currency_check_news(curated, "2026-07-02")
+    assert out["segments"]["hard_news"]  # unchanged, no crash
+
+
 def test_gather_research_retries_empty_beats(monkeypatch):
     import collections
     calls = collections.Counter()

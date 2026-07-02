@@ -1380,6 +1380,90 @@ def enforce_news_floor(curated: dict[str, Any], research: dict[str, list[dict[st
     return curated
 
 
+# ─── CURRENCY CHECK (drop stale/anniversary items before writing) ─────────────
+# The research beats occasionally hallucinate a prior-year event as brand-new —
+# e.g. Sonar reported the One Big Beautiful Bill Act (passed July 2025) as if the
+# House "muscled it through late Wednesday" in 2026, on its anniversary. This
+# verifies the top news items are actually recent and drops confirmed-stale ones
+# BEFORE they're written (the news floor then backfills).
+
+CURRENCY_SYSTEM_PROMPT = """You guard a daily news show against STALE or ANNIVERSARY stories being
+presented as brand-new. For each numbered news item, use live web search to find when the described
+event ACTUALLY happened, then judge it against today's date.
+
+THE KEY FAILURE TO CATCH: a famous law, ruling, election, or deal from a PRIOR YEAR resurfacing today
+(often on its ANNIVERSARY) and mistaken for a fresh event. Check the ORIGINAL date and YEAR. Example:
+the "One Big Beautiful Bill Act" passed/was signed in JULY 2025 — a 2026 claim that it just passed is STALE.
+
+Output STRICT JSON only — no prose, no fences:
+{"items": [{"id": <n>, "actually_happened": "<YYYY-MM, 'last few days', or 'unknown'>",
+            "verdict": "recent" | "stale" | "uncertain", "reason": "<one sentence>"}]}
+"recent" = the core event happened within ~10 days of today. "stale" = it actually happened materially
+earlier (a prior month or YEAR / an anniversary). Only say "stale" with web evidence — but a wrong YEAR
+is always stale. When unsure, say "uncertain" (we keep those)."""
+
+
+def currency_check_news(curated: dict[str, Any], date_str: str,
+                        segments: tuple[str, ...] = ("hard_news", "politics")) -> dict[str, Any]:
+    """Drop curated news items whose core event is actually from a prior period/year.
+
+    Best-effort and non-fatal. Only drops items the verifier marks 'stale' with
+    confidence; 'uncertain' items are kept.
+    """
+    segs = curated.get("segments", {})
+    items: list[dict[str, Any]] = []
+    for seg in segments:
+        items.extend(segs.get(seg, []) or [])
+    if not items:
+        return curated
+
+    numbered = "\n".join(
+        f'{n+1}. "{it.get("headline", "")}" — {(it.get("detail") or "")[:160]}'
+        for n, it in enumerate(items))
+    prompt = (today_preamble(dt.date.fromisoformat(date_str)) +
+              f"Today is {date_str}. For each news item decide if its core event is actually from the "
+              f"last few days or is older / an anniversary / a prior-year event:\n{numbered}\n\n"
+              "Return the JSON now.")
+    try:
+        raw = pplx_chat(prompt, model=RESEARCH_MODEL, max_tokens=2000,
+                        system=CURRENCY_SYSTEM_PROMPT, temperature=0.1)
+    except Exception as e:  # noqa: BLE001
+        print(f"[currency] check failed (non-fatal): {e}", file=sys.stderr)
+        return curated
+
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```\s*$", "", cleaned)
+    s, e = cleaned.find("{"), cleaned.rfind("}")
+    if s != -1 and e != -1:
+        cleaned = cleaned[s:e + 1]
+    try:
+        verdicts = json.loads(cleaned).get("items", [])
+    except json.JSONDecodeError:
+        return curated
+
+    stale_headlines: set[str] = set()
+    for v in verdicts:
+        try:
+            idx = int(v.get("id", 0)) - 1
+        except (TypeError, ValueError):
+            continue
+        if 0 <= idx < len(items) and (v.get("verdict") or "").lower() == "stale":
+            hl = items[idx].get("headline", "")
+            stale_headlines.add(hl)
+            print(f"[currency] DROP stale: '{hl[:70]}' — actually {v.get('actually_happened','?')}"
+                  f" ({v.get('reason','')[:80]})", file=sys.stderr)
+    if stale_headlines:
+        for seg in segments:
+            segs[seg] = [it for it in (segs.get(seg, []) or [])
+                         if it.get("headline", "") not in stale_headlines]
+        curated["segments"] = segs
+    else:
+        print("[currency] all news items check out as recent", file=sys.stderr)
+    return curated
+
+
 # ─── SCRIPT NUMERIC FACT-CHECK ───────────────────────────────────────────────
 
 _NUM_CLAIM_PATTERNS = [
@@ -1619,9 +1703,13 @@ _RECENCY_EVENT_RE = re.compile(
     r"\b(won|beat|defeated|clinched|crowned|advanced|eliminated|knocked out|"
     r"traded|signed|hired|fired|resigned|stepped down|elected|sworn in|appointed|"
     r"launched|released|unveiled|announced|acquired|merged|filed|indicted|"
+    r"passed|passes|approved|approves|voted|enacted|ratified|muscled through|"
+    r"struck down|overturned|upheld|ruled|sentenced|convicted|acquitted|ousted|"
     r"died|passed away|premiered|dropped|debuted|set a record|broke the record)\b"
-    r"|\b(today|yesterday|tonight|last night|this (?:week|morning|weekend)|"
-    r"on (?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b",
+    r"|\b(today|yesterday|tonight|last night|overnight|pre-?dawn|"
+    r"this (?:week|month|year|morning|weekend)|last (?:week|month|year)|"
+    r"(?:a few |several )?days ago|weeks ago|earlier this (?:week|month)|"
+    r"(?:late |early )?(?:on )?(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b",
     re.IGNORECASE)
 
 # Numbers in the live-markets/macro blocks are ground truth — don't recency-audit them.
@@ -1649,19 +1737,27 @@ def _extract_recency_claims(lines: list[dict[str, str]],
 
 RECENCY_SYSTEM_PROMPT = """You verify whether described events are CURRENT relative to a given date.
 You will get today's date and a numbered list of statements from a news podcast. For EACH statement,
-use live web knowledge to judge when the described event actually happened.
+use live web search to find when the described event ACTUALLY happened, then judge it.
+
+WATCH FOR THE ANNIVERSARY TRAP — the most important thing you catch:
+A famous law, ruling, election, deal, or event from a PRIOR YEAR often resurfaces in coverage (often on
+its ANNIVERSARY) and gets mistaken for a brand-new event. ALWAYS check the event's ORIGINAL date and
+YEAR, not just the month. Example: the "One Big Beautiful Bill Act" was passed and signed in JULY 2025 —
+so any 2026 statement that it "passed this week" / "late Wednesday" is STALE by a full year. Be
+especially skeptical of well-known named legislation, court rulings, and elections described as if new.
 
 Output STRICT JSON only — no prose, no fences:
 {"verdicts": [
   {"id": <n>, "verdict": "current" | "stale" | "unknown",
-   "actual_timing": "<when it really happened, e.g. 'April 2026' or 'unknown'>",
+   "actual_timing": "<the event's real date/year, e.g. 'July 2025' or 'unknown'>",
    "rewrite": "<if stale: rewrite the FULL statement so the timing is accurate and explicit
-               (e.g. add 'back in April' / 'last season'); keep all other facts and the speaking
-               style identical. If current or unknown: empty string>"}
+               (e.g. 'A year ago, in July 2025, the House passed…' / 'back in April'); keep all other
+               facts and the speaking style identical. If current or unknown: empty string>"}
 ]}
-"current" = the event happened within roughly the last 10 days of today's date.
-"stale" = it happened materially earlier but is framed as recent/just-happened.
-Be conservative: only mark "stale" when you are reasonably confident it is genuinely older."""
+"current" = the core event happened within roughly the last 10 days of today's date.
+"stale" = it actually happened materially earlier (a prior month or YEAR, an anniversary) but is framed
+as recent/just-happened.
+Only mark "stale" when web evidence shows the event is genuinely older — but a wrong YEAR is always stale."""
 
 
 def recency_audit_script(lines: list[dict[str, str]], date_str: str,
@@ -2783,6 +2879,8 @@ def main() -> int:
         print("[4b/7] Memory review (Pass 2: new/update/repeat labels)…", file=sys.stderr)
         curated = run_two_pass_curation(curated, recap_block, recaps, today)
     curated = programmatic_dedupe(curated, recaps, today)          # hard safety net
+    print("[4c/7] Currency check (drop stale/anniversary news)…", file=sys.stderr)
+    curated = currency_check_news(curated, today)                  # drop prior-year events
     curated = enforce_news_floor(curated, research)                # hard_news/politics floor
     (work_dir / "curated.json").write_text(json.dumps(curated, indent=2))
 

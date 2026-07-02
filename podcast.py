@@ -58,6 +58,7 @@ import memory
 import curator as curator_mod
 import editorial
 import macro as macro_mod
+import news_feeds
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
@@ -445,6 +446,33 @@ def _run_one_beat(label: str, prompt: str, preamble: str) -> list[dict[str, Any]
     for it in items:
         it["beat"] = label
     return items
+
+
+def _wire_http_get(url: str) -> str:
+    """Fetch an RSS/Atom feed via httpx (gzip/redirects/TLS; proven on the runner)."""
+    r = httpx.get(url, timeout=10.0, follow_redirects=True,
+                  headers={"User-Agent": "Mozilla/5.0 (podcast-newsfeeds)"})
+    r.raise_for_status()
+    return r.text
+
+
+def gather_wire_news() -> dict[str, list[dict[str, Any]]]:
+    """Deterministic, real-source news from RSS feeds — the trusted news backbone.
+
+    Returns wire_world / wire_us / wire_business beats of REAL, dated articles
+    (best-effort). These are grounded primary sources — no LLM discovery — so they
+    can't fabricate events like the Sonar beats do.
+    """
+    print("[wire] fetching real news from trusted RSS feeds…", file=sys.stderr)
+    try:
+        wire = news_feeds.gather_wire_news(
+            _wire_http_get, log=lambda m: print(m, file=sys.stderr))
+    except Exception as e:  # noqa: BLE001
+        print(f"[wire] fetch failed (non-fatal): {e}", file=sys.stderr)
+        return {}
+    total = sum(len(v) for v in wire.values())
+    print(f"[wire] {total} real articles across {len(wire)} feeds", file=sys.stderr)
+    return wire
 
 
 def gather_research(max_retry_rounds: int = 2) -> dict[str, list[dict[str, Any]]]:
@@ -859,6 +887,21 @@ Route topics to segments by what they ARE ABOUT, not by which beat returned them
 - A sports narrative (rivalry, star, standings, strategy) belongs in SPORTS.
 The `beat` tag on each item is INFORMATIONAL ONLY — cross-routing is expected and encouraged.
 
+TRUSTED WIRE ITEMS ARE THE NEWS BACKBONE
+Some candidates are marked `"trusted": true` (beats starting with `wire_`). These are REAL,
+timestamped articles pulled directly from major newsrooms' feeds (BBC, NPR, Guardian, NYT, Al Jazeera,
+plus Reuters/AP via aggregation) — each has a genuine headline, working URL, and `published` date, so
+its event is GUARANTEED to have actually happened on that date. The other candidates come from an
+open-ended AI research pass and can occasionally hallucinate or resurface a year-old event as if fresh.
+Therefore:
+- For HARD_NEWS, POLITICS, and ECONOMY, PREFER trusted wire items. When a wire item and a non-trusted
+  item cover the same story, keep the WIRE one (its URL/date are verified).
+- Build HARD_NEWS primarily from `wire_*` items. Only fall back to non-trusted research for a hard-news
+  slot when no wire item covers that story.
+- A non-trusted item making a strong dated claim ("passed Wednesday", "overnight", "this week") that NO
+  wire item corroborates is suspect — deprioritize or drop it rather than lead with it.
+- You may still use non-trusted research freely for TECH_AI, SCIENCE, FEATURE, CULTURE, and SPORTS.
+
 NO FORUM FILLER IN THE NEWS SEGMENTS
 Reddit / forum discussion threads and "Ask<X>" threads (e.g. r/changemyview, AskHistorians, AskAcademia)
 are NOT news and NOT political reporting. NEVER place them in HARD_NEWS or POLITICS. They may appear in
@@ -943,14 +986,20 @@ def _normalize_pool(research: dict[str, list[dict[str, Any]]]) -> list[dict[str,
     flat: list[dict[str, Any]] = []
     for beat, items in research.items():
         for it in items:
-            flat.append({
+            entry = {
                 "headline": (it.get("headline") or "")[:200],
                 "detail":   (it.get("detail") or "")[:280],
                 "angle":    (it.get("angle") or "")[:160],
                 "source":   (it.get("source") or "")[:80],
                 "url":      it.get("url") or "",
                 "beat":     beat,
-            })
+            }
+            # Surface the grounded-source markers so the editor can prefer wire items.
+            if it.get("trusted"):
+                entry["trusted"] = True
+            if it.get("published"):
+                entry["published"] = it["published"]
+            flat.append(entry)
     return flat
 
 
@@ -1312,7 +1361,10 @@ def programmatic_dedupe(curated: dict[str, Any],
 # ─── NEWS FLOOR (hard_news must never be empty/filler) ───────────────────────
 # Beats that produce real reporting vs. discussion-thread filler. hard_news and
 # politics must be built from reporting, never from Reddit/forum chatter.
-_NEWS_BEATS = ["geopolitics", "us_politics", "economics", "tech_news"]
+# wire_* beats (real RSS articles) come FIRST so the news floor prefers grounded,
+# primary-source reporting over Sonar-discovered items when topping up hard news.
+_NEWS_BEATS = ["wire_world", "wire_us", "wire_business",
+               "geopolitics", "us_politics", "economics", "tech_news"]
 _DISCUSSION_BEATS = {"reddit", "weird_internet"}
 MIN_HARD_NEWS = 3
 
@@ -1364,7 +1416,7 @@ def enforce_news_floor(curated: dict[str, Any], research: dict[str, list[dict[st
     real_pol = [it for it in pol if it.get("beat") not in _DISCUSSION_BEATS]
     if not real_pol:
         injected = 0
-        for cand in unused_news(["us_politics", "geopolitics"], placed_set()):
+        for cand in unused_news(["wire_us", "wire_world", "us_politics", "geopolitics"], placed_set()):
             pol.insert(injected, cand)  # real reporting goes first, filler stays as backup
             injected += 1
             if injected >= 3:
@@ -1413,7 +1465,9 @@ def currency_check_news(curated: dict[str, Any], date_str: str,
     segs = curated.get("segments", {})
     items: list[dict[str, Any]] = []
     for seg in segments:
-        items.extend(segs.get(seg, []) or [])
+        # Trusted wire items carry a real publish date, so the anniversary/stale
+        # trap can't apply — skip them (they're the antidote, not a suspect).
+        items.extend(it for it in (segs.get(seg, []) or []) if not it.get("trusted"))
     if not items:
         return curated
 
@@ -2863,6 +2917,9 @@ def main() -> int:
 
     print(f"[2/7] Wide-net research ({len(BEATS)} beats)…", file=sys.stderr)
     research = gather_research()
+    # Trusted, grounded news backbone: real RSS articles from major newsrooms. These
+    # wire_* beats become the primary source for hard news (Sonar stays for discovery).
+    research.update(gather_wire_news())
     (work_dir / "research.json").write_text(json.dumps(research, indent=2))
     total_cands = sum(len(v) for v in research.values())
     print(f"[research] {total_cands} total candidate topics", file=sys.stderr)

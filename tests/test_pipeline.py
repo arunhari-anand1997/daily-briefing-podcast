@@ -153,6 +153,66 @@ def test_enforce_news_floor_fills_and_strips_reddit():
     assert any(it.get("beat") == "us_politics" for it in pol)
 
 
+def test_enforce_news_floor_prefers_wire_items():
+    # hard_news is empty; both a trusted wire item and a Sonar item are available.
+    # The wire item (real, dated) must be pulled in ahead of the Sonar geopolitics item.
+    curated = {"segments": {"hard_news": [], "politics": []}}
+    research = {
+        "wire_world": [{"headline": "Ceasefire signed after overnight talks",
+                        "beat": "wire_world", "trusted": True, "url": "http://w",
+                        "published": "2026-07-02"}],
+        "geopolitics": [{"headline": "Sonar-discovered conflict flares"}],
+        "us_politics": [{"headline": "Sonar political story"}],
+        "economics": [{"headline": "Sonar jobs story"}],
+    }
+    out = podcast.enforce_news_floor(curated, research, min_hard_news=3)
+    hn = out["segments"]["hard_news"]
+    heads = [it["headline"] for it in hn]
+    # the trusted wire item is present and appears before the Sonar geopolitics item
+    assert "Ceasefire signed after overnight talks" in heads
+    assert heads.index("Ceasefire signed after overnight talks") < heads.index(
+        "Sonar-discovered conflict flares")
+    wire_it = next(it for it in hn if it["headline"].startswith("Ceasefire"))
+    assert wire_it.get("trusted") is True  # trusted flag carried through the top-up
+
+
+def test_currency_check_skips_trusted_wire_items(monkeypatch):
+    # A trusted wire item must NEVER be sent to the (fallible) currency verifier:
+    # it carries a real publish date, so it can't be a stale anniversary.
+    curated = {"segments": {"hard_news": [
+        {"headline": "House passes One Big Beautiful Bill", "detail": "...", "trusted": True},
+        {"headline": "Sonar claims some vote happened Wednesday", "detail": "..."},
+    ]}}
+    sent = {}
+
+    def fake_chat(prompt, *a, **k):
+        sent["prompt"] = prompt
+        return json.dumps({"items": [{"id": 1, "verdict": "recent",
+                                      "actually_happened": "days ago", "reason": "x"}]})
+
+    monkeypatch.setattr(podcast, "pplx_chat", fake_chat)
+    out = podcast.currency_check_news(curated, "2026-07-02")
+    # the trusted item is not offered to the verifier...
+    assert "One Big Beautiful Bill" not in sent["prompt"]
+    assert "Sonar claims some vote" in sent["prompt"]
+    # ...and it survives regardless of any verdict
+    heads = [it["headline"] for it in out["segments"]["hard_news"]]
+    assert "House passes One Big Beautiful Bill" in heads
+
+
+def test_normalize_pool_surfaces_trusted_and_published():
+    research = {
+        "wire_world": [{"headline": "Real wire story", "trusted": True,
+                        "published": "2026-07-02", "url": "http://w"}],
+        "geopolitics": [{"headline": "Sonar story", "url": "http://s"}],
+    }
+    pool = podcast._normalize_pool(research)
+    wire = next(p for p in pool if p["headline"] == "Real wire story")
+    sonar = next(p for p in pool if p["headline"] == "Sonar story")
+    assert wire.get("trusted") is True and wire.get("published") == "2026-07-02"
+    assert "trusted" not in sonar and "published" not in sonar  # untrusted items unmarked
+
+
 def test_curate_topics_falls_back_on_api_failure(monkeypatch):
     # A curator API failure (e.g. 400) must NOT crash the run — fall back deterministically.
     def boom(*a, **k):

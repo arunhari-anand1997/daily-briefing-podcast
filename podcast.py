@@ -1003,6 +1003,32 @@ def _normalize_pool(research: dict[str, list[dict[str, Any]]]) -> list[dict[str,
     return flat
 
 
+# Cap the curator's candidate pool. An oversized prompt makes Perplexity 400 (seen
+# at ~122 candidates + a big recap; adding the wire beats pushed it to 169 and the
+# curator silently fell back to deterministic routing). Keep ALL trusted wire items
+# (the grounded backbone) and cap the AI-discovery beats per-beat, then bound total.
+CURATOR_POOL_MAX = 120
+CURATOR_PER_BEAT_CAP = 7
+
+
+def _cap_pool(pool: list[dict[str, Any]], *, max_total: int = CURATOR_POOL_MAX,
+              per_beat_cap: int = CURATOR_PER_BEAT_CAP) -> list[dict[str, Any]]:
+    """Trim the candidate pool for the curator prompt without dropping wire items."""
+    if len(pool) <= max_total:
+        return pool
+    wire = [p for p in pool if p.get("trusted")]
+    rest = [p for p in pool if not p.get("trusted")]
+    seen: dict[str, int] = {}
+    capped_rest: list[dict[str, Any]] = []
+    for p in rest:  # keep each AI beat's first N (research returns them roughly ranked)
+        b = p.get("beat", "")
+        if seen.get(b, 0) < per_beat_cap:
+            capped_rest.append(p)
+            seen[b] = seen.get(b, 0) + 1
+    combined = wire + capped_rest  # wire first so the global cap never trims it
+    return combined[:max_total]
+
+
 def curate_topics(research: dict[str, list[dict[str, Any]]],
                   recap_block: str,
                   date_str: str) -> dict[str, Any]:
@@ -1011,6 +1037,12 @@ def curate_topics(research: dict[str, list[dict[str, Any]]],
     On failure, falls back to a deterministic rule-based curation so the show still ships.
     """
     pool = _normalize_pool(research)
+    raw_n = len(pool)
+    pool = _cap_pool(pool)
+    if len(pool) < raw_n:
+        n_wire = sum(1 for p in pool if p.get("trusted"))
+        print(f"[curator] pool capped {raw_n}→{len(pool)} (kept all {n_wire} wire items) "
+              "to stay under the prompt-size limit", file=sys.stderr)
     print(f"[curator] {len(pool)} candidate topics from {len(research)} beats", file=sys.stderr)
     if not pool:
         return {"segments": {k: [] for k in SEGMENT_TARGET_TOPICS}, "editor_note": "(no research)"}

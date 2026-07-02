@@ -213,6 +213,26 @@ def test_normalize_pool_surfaces_trusted_and_published():
     assert "trusted" not in sonar and "published" not in sonar  # untrusted items unmarked
 
 
+def test_cap_pool_keeps_all_wire_and_bounds_total():
+    # 60 wire items + 200 Sonar items across 5 beats -> capped, but every wire item survives.
+    wire = [{"headline": f"wire {i}", "beat": "wire_world", "trusted": True} for i in range(60)]
+    rest = [{"headline": f"sonar {b}-{i}", "beat": f"beat{b}"}
+            for b in range(5) for i in range(40)]
+    capped = podcast._cap_pool(wire + rest, max_total=120, per_beat_cap=7)
+    assert len(capped) <= 120
+    # all 60 trusted wire items retained
+    assert sum(1 for p in capped if p.get("trusted")) == 60
+    # each Sonar beat trimmed to the per-beat cap
+    from collections import Counter
+    beat_counts = Counter(p["beat"] for p in capped if not p.get("trusted"))
+    assert all(v <= 7 for v in beat_counts.values())
+
+
+def test_cap_pool_noop_when_small():
+    pool = [{"headline": "a", "beat": "x"}, {"headline": "b", "beat": "y", "trusted": True}]
+    assert podcast._cap_pool(pool, max_total=120) is pool  # unchanged when under the cap
+
+
 def test_curate_topics_falls_back_on_api_failure(monkeypatch):
     # A curator API failure (e.g. 400) must NOT crash the run — fall back deterministically.
     def boom(*a, **k):

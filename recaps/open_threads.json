@@ -14,9 +14,9 @@
     },
     {
       "thread_id": "us_iran_hostilities_sanctions_waiver_2026",
-      "label": "US and Iran pause cross‑border strikes but remain divided over next steps in talks as regi",
+      "label": "U.S. Hopes for Investment in Iran Would Break With Decades of History",
       "first_episode": "2026-06-26",
-      "last_episode": "2026-07-01",
+      "last_episode": "2026-07-02",
       "next_milestone": "",
       "hooks": [
         "Iran hit a commercial vessel on a UN‑escorted corridor in the Strait of Hormuz, causing the UN to pause a new maritime evacuation plan amid the ongoing U.S.–Iran hostilities we covered with war powers resolutions and sanctions waivers.",
@@ -27,9 +27,9 @@
     },
     {
       "thread_id": "russia_ukraine_war_2026",
-      "label": "Russia launches major missile and drone barrage across Ukraine as Poland warns of intensif",
+      "label": "Live Updates: Russia Hammers Ukraine’s Capital in Deadly Attacks",
       "first_episode": "2026-06-26",
-      "last_episode": "2026-07-01",
+      "last_episode": "2026-07-02",
       "next_milestone": "",
       "hooks": [
         "continuing coverage of an ongoing story"
@@ -66,7 +66,7 @@
     },
     {
       "thread_id": "samsung_buyback_chip_strategy_2026",
-      "label": "SK Hynix announces $51 billion NAND factory investment to meet AI-driven memory demand",
+      "label": "SK Hynix to invest over $51 billion in new NAND factory to meet AI-driven demand",
       "first_episode": "2026-06-26",
       "last_episode": "2026-07-02",
       "next_milestone": "",
@@ -74,7 +74,8 @@
         "Samsung is preparing a 1,000 trillion won (about $648 billion) ten‑year investment plan in South Korea, including roughly 300 trillion won for new chip fabs, building on the previously covered $58.6 billion share buyback and signaling a larger strategic expansion.",
         "continuing coverage of an ongoing story",
         "Introduces a separate national 800 trillion won chip‑and‑AI project with new Samsung and SK Hynix fabs, complementing the previously covered 1,000 trillion won Samsung investment plan.",
-        "SK Hynix said on Thursday it will invest 80 trillion won to build a new NAND memory chip factory by 2029."
+        "SK Hynix said on Thursday it will invest 80 trillion won to build a new NAND memory chip factory by 2029.",
+        "Samsung Group detailed a separate 140 trillion won investment plan in South Korea for displays, batteries, chips and chip materials."
       ],
       "status": "developing"
     },
@@ -104,7 +105,7 @@
     },
     {
       "thread_id": "usmnt_world_cup_group_d_2026",
-      "label": "U.S. men’s team beats Bosnia 2-0 to reach World Cup last 16, earning its first knockout wi",
+      "label": "Malik Tillman’s bloody sock game rockets into US World Cup history",
       "first_episode": "2026-06-26",
       "last_episode": "2026-07-02",
       "next_milestone": "",

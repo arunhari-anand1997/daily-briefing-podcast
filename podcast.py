@@ -58,6 +58,7 @@ import memory
 import curator as curator_mod
 import editorial
 import macro as macro_mod
+import news_feeds
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
@@ -445,6 +446,33 @@ def _run_one_beat(label: str, prompt: str, preamble: str) -> list[dict[str, Any]
     for it in items:
         it["beat"] = label
     return items
+
+
+def _wire_http_get(url: str) -> str:
+    """Fetch an RSS/Atom feed via httpx (gzip/redirects/TLS; proven on the runner)."""
+    r = httpx.get(url, timeout=10.0, follow_redirects=True,
+                  headers={"User-Agent": "Mozilla/5.0 (podcast-newsfeeds)"})
+    r.raise_for_status()
+    return r.text
+
+
+def gather_wire_news() -> dict[str, list[dict[str, Any]]]:
+    """Deterministic, real-source news from RSS feeds — the trusted news backbone.
+
+    Returns wire_world / wire_us / wire_business beats of REAL, dated articles
+    (best-effort). These are grounded primary sources — no LLM discovery — so they
+    can't fabricate events like the Sonar beats do.
+    """
+    print("[wire] fetching real news from trusted RSS feeds…", file=sys.stderr)
+    try:
+        wire = news_feeds.gather_wire_news(
+            _wire_http_get, log=lambda m: print(m, file=sys.stderr))
+    except Exception as e:  # noqa: BLE001
+        print(f"[wire] fetch failed (non-fatal): {e}", file=sys.stderr)
+        return {}
+    total = sum(len(v) for v in wire.values())
+    print(f"[wire] {total} real articles across {len(wire)} feeds", file=sys.stderr)
+    return wire
 
 
 def gather_research(max_retry_rounds: int = 2) -> dict[str, list[dict[str, Any]]]:
@@ -859,6 +887,21 @@ Route topics to segments by what they ARE ABOUT, not by which beat returned them
 - A sports narrative (rivalry, star, standings, strategy) belongs in SPORTS.
 The `beat` tag on each item is INFORMATIONAL ONLY — cross-routing is expected and encouraged.
 
+TRUSTED WIRE ITEMS ARE THE NEWS BACKBONE
+Some candidates are marked `"trusted": true` (beats starting with `wire_`). These are REAL,
+timestamped articles pulled directly from major newsrooms' feeds (BBC, NPR, Guardian, NYT, Al Jazeera,
+plus Reuters/AP via aggregation) — each has a genuine headline, working URL, and `published` date, so
+its event is GUARANTEED to have actually happened on that date. The other candidates come from an
+open-ended AI research pass and can occasionally hallucinate or resurface a year-old event as if fresh.
+Therefore:
+- For HARD_NEWS, POLITICS, and ECONOMY, PREFER trusted wire items. When a wire item and a non-trusted
+  item cover the same story, keep the WIRE one (its URL/date are verified).
+- Build HARD_NEWS primarily from `wire_*` items. Only fall back to non-trusted research for a hard-news
+  slot when no wire item covers that story.
+- A non-trusted item making a strong dated claim ("passed Wednesday", "overnight", "this week") that NO
+  wire item corroborates is suspect — deprioritize or drop it rather than lead with it.
+- You may still use non-trusted research freely for TECH_AI, SCIENCE, FEATURE, CULTURE, and SPORTS.
+
 NO FORUM FILLER IN THE NEWS SEGMENTS
 Reddit / forum discussion threads and "Ask<X>" threads (e.g. r/changemyview, AskHistorians, AskAcademia)
 are NOT news and NOT political reporting. NEVER place them in HARD_NEWS or POLITICS. They may appear in
@@ -943,15 +986,47 @@ def _normalize_pool(research: dict[str, list[dict[str, Any]]]) -> list[dict[str,
     flat: list[dict[str, Any]] = []
     for beat, items in research.items():
         for it in items:
-            flat.append({
+            entry = {
                 "headline": (it.get("headline") or "")[:200],
                 "detail":   (it.get("detail") or "")[:280],
                 "angle":    (it.get("angle") or "")[:160],
                 "source":   (it.get("source") or "")[:80],
                 "url":      it.get("url") or "",
                 "beat":     beat,
-            })
+            }
+            # Surface the grounded-source markers so the editor can prefer wire items.
+            if it.get("trusted"):
+                entry["trusted"] = True
+            if it.get("published"):
+                entry["published"] = it["published"]
+            flat.append(entry)
     return flat
+
+
+# Cap the curator's candidate pool. An oversized prompt makes Perplexity 400 (seen
+# at ~122 candidates + a big recap; adding the wire beats pushed it to 169 and the
+# curator silently fell back to deterministic routing). Keep ALL trusted wire items
+# (the grounded backbone) and cap the AI-discovery beats per-beat, then bound total.
+CURATOR_POOL_MAX = 120
+CURATOR_PER_BEAT_CAP = 7
+
+
+def _cap_pool(pool: list[dict[str, Any]], *, max_total: int = CURATOR_POOL_MAX,
+              per_beat_cap: int = CURATOR_PER_BEAT_CAP) -> list[dict[str, Any]]:
+    """Trim the candidate pool for the curator prompt without dropping wire items."""
+    if len(pool) <= max_total:
+        return pool
+    wire = [p for p in pool if p.get("trusted")]
+    rest = [p for p in pool if not p.get("trusted")]
+    seen: dict[str, int] = {}
+    capped_rest: list[dict[str, Any]] = []
+    for p in rest:  # keep each AI beat's first N (research returns them roughly ranked)
+        b = p.get("beat", "")
+        if seen.get(b, 0) < per_beat_cap:
+            capped_rest.append(p)
+            seen[b] = seen.get(b, 0) + 1
+    combined = wire + capped_rest  # wire first so the global cap never trims it
+    return combined[:max_total]
 
 
 def curate_topics(research: dict[str, list[dict[str, Any]]],
@@ -962,6 +1037,12 @@ def curate_topics(research: dict[str, list[dict[str, Any]]],
     On failure, falls back to a deterministic rule-based curation so the show still ships.
     """
     pool = _normalize_pool(research)
+    raw_n = len(pool)
+    pool = _cap_pool(pool)
+    if len(pool) < raw_n:
+        n_wire = sum(1 for p in pool if p.get("trusted"))
+        print(f"[curator] pool capped {raw_n}→{len(pool)} (kept all {n_wire} wire items) "
+              "to stay under the prompt-size limit", file=sys.stderr)
     print(f"[curator] {len(pool)} candidate topics from {len(research)} beats", file=sys.stderr)
     if not pool:
         return {"segments": {k: [] for k in SEGMENT_TARGET_TOPICS}, "editor_note": "(no research)"}
@@ -1312,7 +1393,10 @@ def programmatic_dedupe(curated: dict[str, Any],
 # ─── NEWS FLOOR (hard_news must never be empty/filler) ───────────────────────
 # Beats that produce real reporting vs. discussion-thread filler. hard_news and
 # politics must be built from reporting, never from Reddit/forum chatter.
-_NEWS_BEATS = ["geopolitics", "us_politics", "economics", "tech_news"]
+# wire_* beats (real RSS articles) come FIRST so the news floor prefers grounded,
+# primary-source reporting over Sonar-discovered items when topping up hard news.
+_NEWS_BEATS = ["wire_world", "wire_us", "wire_business",
+               "geopolitics", "us_politics", "economics", "tech_news"]
 _DISCUSSION_BEATS = {"reddit", "weird_internet"}
 MIN_HARD_NEWS = 3
 
@@ -1364,7 +1448,7 @@ def enforce_news_floor(curated: dict[str, Any], research: dict[str, list[dict[st
     real_pol = [it for it in pol if it.get("beat") not in _DISCUSSION_BEATS]
     if not real_pol:
         injected = 0
-        for cand in unused_news(["us_politics", "geopolitics"], placed_set()):
+        for cand in unused_news(["wire_us", "wire_world", "us_politics", "geopolitics"], placed_set()):
             pol.insert(injected, cand)  # real reporting goes first, filler stays as backup
             injected += 1
             if injected >= 3:
@@ -1377,6 +1461,92 @@ def enforce_news_floor(curated: dict[str, Any], research: dict[str, list[dict[st
         log.append("[news-floor] WARNING: hard_news still empty — no news-beat items available")
     for line in log:
         print(line, file=sys.stderr)
+    return curated
+
+
+# ─── CURRENCY CHECK (drop stale/anniversary items before writing) ─────────────
+# The research beats occasionally hallucinate a prior-year event as brand-new —
+# e.g. Sonar reported the One Big Beautiful Bill Act (passed July 2025) as if the
+# House "muscled it through late Wednesday" in 2026, on its anniversary. This
+# verifies the top news items are actually recent and drops confirmed-stale ones
+# BEFORE they're written (the news floor then backfills).
+
+CURRENCY_SYSTEM_PROMPT = """You guard a daily news show against STALE or ANNIVERSARY stories being
+presented as brand-new. For each numbered news item, use live web search to find when the described
+event ACTUALLY happened, then judge it against today's date.
+
+THE KEY FAILURE TO CATCH: a famous law, ruling, election, or deal from a PRIOR YEAR resurfacing today
+(often on its ANNIVERSARY) and mistaken for a fresh event. Check the ORIGINAL date and YEAR. Example:
+the "One Big Beautiful Bill Act" passed/was signed in JULY 2025 — a 2026 claim that it just passed is STALE.
+
+Output STRICT JSON only — no prose, no fences:
+{"items": [{"id": <n>, "actually_happened": "<YYYY-MM, 'last few days', or 'unknown'>",
+            "verdict": "recent" | "stale" | "uncertain", "reason": "<one sentence>"}]}
+"recent" = the core event happened within ~10 days of today. "stale" = it actually happened materially
+earlier (a prior month or YEAR / an anniversary). Only say "stale" with web evidence — but a wrong YEAR
+is always stale. When unsure, say "uncertain" (we keep those)."""
+
+
+def currency_check_news(curated: dict[str, Any], date_str: str,
+                        segments: tuple[str, ...] = ("hard_news", "politics")) -> dict[str, Any]:
+    """Drop curated news items whose core event is actually from a prior period/year.
+
+    Best-effort and non-fatal. Only drops items the verifier marks 'stale' with
+    confidence; 'uncertain' items are kept.
+    """
+    segs = curated.get("segments", {})
+    items: list[dict[str, Any]] = []
+    for seg in segments:
+        # Trusted wire items carry a real publish date, so the anniversary/stale
+        # trap can't apply — skip them (they're the antidote, not a suspect).
+        items.extend(it for it in (segs.get(seg, []) or []) if not it.get("trusted"))
+    if not items:
+        return curated
+
+    numbered = "\n".join(
+        f'{n+1}. "{it.get("headline", "")}" — {(it.get("detail") or "")[:160]}'
+        for n, it in enumerate(items))
+    prompt = (today_preamble(dt.date.fromisoformat(date_str)) +
+              f"Today is {date_str}. For each news item decide if its core event is actually from the "
+              f"last few days or is older / an anniversary / a prior-year event:\n{numbered}\n\n"
+              "Return the JSON now.")
+    try:
+        raw = pplx_chat(prompt, model=RESEARCH_MODEL, max_tokens=2000,
+                        system=CURRENCY_SYSTEM_PROMPT, temperature=0.1)
+    except Exception as e:  # noqa: BLE001
+        print(f"[currency] check failed (non-fatal): {e}", file=sys.stderr)
+        return curated
+
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```\s*$", "", cleaned)
+    s, e = cleaned.find("{"), cleaned.rfind("}")
+    if s != -1 and e != -1:
+        cleaned = cleaned[s:e + 1]
+    try:
+        verdicts = json.loads(cleaned).get("items", [])
+    except json.JSONDecodeError:
+        return curated
+
+    stale_headlines: set[str] = set()
+    for v in verdicts:
+        try:
+            idx = int(v.get("id", 0)) - 1
+        except (TypeError, ValueError):
+            continue
+        if 0 <= idx < len(items) and (v.get("verdict") or "").lower() == "stale":
+            hl = items[idx].get("headline", "")
+            stale_headlines.add(hl)
+            print(f"[currency] DROP stale: '{hl[:70]}' — actually {v.get('actually_happened','?')}"
+                  f" ({v.get('reason','')[:80]})", file=sys.stderr)
+    if stale_headlines:
+        for seg in segments:
+            segs[seg] = [it for it in (segs.get(seg, []) or [])
+                         if it.get("headline", "") not in stale_headlines]
+        curated["segments"] = segs
+    else:
+        print("[currency] all news items check out as recent", file=sys.stderr)
     return curated
 
 
@@ -1619,9 +1789,13 @@ _RECENCY_EVENT_RE = re.compile(
     r"\b(won|beat|defeated|clinched|crowned|advanced|eliminated|knocked out|"
     r"traded|signed|hired|fired|resigned|stepped down|elected|sworn in|appointed|"
     r"launched|released|unveiled|announced|acquired|merged|filed|indicted|"
+    r"passed|passes|approved|approves|voted|enacted|ratified|muscled through|"
+    r"struck down|overturned|upheld|ruled|sentenced|convicted|acquitted|ousted|"
     r"died|passed away|premiered|dropped|debuted|set a record|broke the record)\b"
-    r"|\b(today|yesterday|tonight|last night|this (?:week|morning|weekend)|"
-    r"on (?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b",
+    r"|\b(today|yesterday|tonight|last night|overnight|pre-?dawn|"
+    r"this (?:week|month|year|morning|weekend)|last (?:week|month|year)|"
+    r"(?:a few |several )?days ago|weeks ago|earlier this (?:week|month)|"
+    r"(?:late |early )?(?:on )?(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b",
     re.IGNORECASE)
 
 # Numbers in the live-markets/macro blocks are ground truth — don't recency-audit them.
@@ -1649,19 +1823,27 @@ def _extract_recency_claims(lines: list[dict[str, str]],
 
 RECENCY_SYSTEM_PROMPT = """You verify whether described events are CURRENT relative to a given date.
 You will get today's date and a numbered list of statements from a news podcast. For EACH statement,
-use live web knowledge to judge when the described event actually happened.
+use live web search to find when the described event ACTUALLY happened, then judge it.
+
+WATCH FOR THE ANNIVERSARY TRAP — the most important thing you catch:
+A famous law, ruling, election, deal, or event from a PRIOR YEAR often resurfaces in coverage (often on
+its ANNIVERSARY) and gets mistaken for a brand-new event. ALWAYS check the event's ORIGINAL date and
+YEAR, not just the month. Example: the "One Big Beautiful Bill Act" was passed and signed in JULY 2025 —
+so any 2026 statement that it "passed this week" / "late Wednesday" is STALE by a full year. Be
+especially skeptical of well-known named legislation, court rulings, and elections described as if new.
 
 Output STRICT JSON only — no prose, no fences:
 {"verdicts": [
   {"id": <n>, "verdict": "current" | "stale" | "unknown",
-   "actual_timing": "<when it really happened, e.g. 'April 2026' or 'unknown'>",
+   "actual_timing": "<the event's real date/year, e.g. 'July 2025' or 'unknown'>",
    "rewrite": "<if stale: rewrite the FULL statement so the timing is accurate and explicit
-               (e.g. add 'back in April' / 'last season'); keep all other facts and the speaking
-               style identical. If current or unknown: empty string>"}
+               (e.g. 'A year ago, in July 2025, the House passed…' / 'back in April'); keep all other
+               facts and the speaking style identical. If current or unknown: empty string>"}
 ]}
-"current" = the event happened within roughly the last 10 days of today's date.
-"stale" = it happened materially earlier but is framed as recent/just-happened.
-Be conservative: only mark "stale" when you are reasonably confident it is genuinely older."""
+"current" = the core event happened within roughly the last 10 days of today's date.
+"stale" = it actually happened materially earlier (a prior month or YEAR, an anniversary) but is framed
+as recent/just-happened.
+Only mark "stale" when web evidence shows the event is genuinely older — but a wrong YEAR is always stale."""
 
 
 def recency_audit_script(lines: list[dict[str, str]], date_str: str,
@@ -2767,6 +2949,9 @@ def main() -> int:
 
     print(f"[2/7] Wide-net research ({len(BEATS)} beats)…", file=sys.stderr)
     research = gather_research()
+    # Trusted, grounded news backbone: real RSS articles from major newsrooms. These
+    # wire_* beats become the primary source for hard news (Sonar stays for discovery).
+    research.update(gather_wire_news())
     (work_dir / "research.json").write_text(json.dumps(research, indent=2))
     total_cands = sum(len(v) for v in research.values())
     print(f"[research] {total_cands} total candidate topics", file=sys.stderr)
@@ -2783,6 +2968,8 @@ def main() -> int:
         print("[4b/7] Memory review (Pass 2: new/update/repeat labels)…", file=sys.stderr)
         curated = run_two_pass_curation(curated, recap_block, recaps, today)
     curated = programmatic_dedupe(curated, recaps, today)          # hard safety net
+    print("[4c/7] Currency check (drop stale/anniversary news)…", file=sys.stderr)
+    curated = currency_check_news(curated, today)                  # drop prior-year events
     curated = enforce_news_floor(curated, research)                # hard_news/politics floor
     (work_dir / "curated.json").write_text(json.dumps(curated, indent=2))
 

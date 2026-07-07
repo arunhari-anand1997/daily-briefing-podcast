@@ -1,14 +1,15 @@
 {
-  "updated": "2026-07-02",
+  "updated": "2026-07-07",
   "threads": [
     {
       "thread_id": "venezuela_double_earthquake_2026",
-      "label": "Venezuela reels from rare double earthquake that kills at least 188 and buries hundreds, p",
+      "label": "Venezuela earthquakes death toll jumps to more than 3,500",
       "first_episode": "2026-06-26",
-      "last_episode": "2026-06-26",
+      "last_episode": "2026-07-07",
       "next_milestone": "",
       "hooks": [
-        "Death toll has reached at least ~188–235 people with hundreds trapped and tens of thousands missing after the rare 7.2/7.5 earthquake doublet near Caracas, triggering large-scale international rescue efforts and political scrutiny."
+        "Death toll has reached at least ~188–235 people with hundreds trapped and tens of thousands missing after the rare 7.2/7.5 earthquake doublet near Caracas, triggering large-scale international rescue efforts and political scrutiny.",
+        "The death toll has increased to over 3,500 from the recent earthquakes in Venezuela."
       ],
       "status": "developing"
     },
@@ -105,14 +106,15 @@
     },
     {
       "thread_id": "usmnt_world_cup_group_d_2026",
-      "label": "Malik Tillman’s bloody sock game rockets into US World Cup history",
+      "label": "Belgium thump USA to reach quarter-finals and end co-hosts' World Cup dream",
       "first_episode": "2026-06-26",
-      "last_episode": "2026-07-02",
+      "last_episode": "2026-07-07",
       "next_milestone": "",
       "hooks": [
         "Following the 3-2 loss to Türkiye, new reports describe the USMNT pivoting to their round of 16 World Cup knockout match against Bosnia and Herzegovina while still advancing as Group D winners.",
         "continuing coverage of an ongoing story",
-        "The U.S. men beat Bosnia 2-0 on Wednesday to clinch the World Cup round of 16."
+        "The U.S. men beat Bosnia 2-0 on Wednesday to clinch the World Cup round of 16.",
+        "Belgium defeated the USA 4-1 in the World Cup last-16 match, eliminating the co-hosts."
       ],
       "status": "developing"
     },

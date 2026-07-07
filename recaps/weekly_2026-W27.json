@@ -1,0 +1,80 @@
+{
+  "threads": [
+    {
+      "thread_id": "supreme-court-tps-ruling",
+      "label": "Supreme Court Ruling on TPS",
+      "entities": [
+        "Supreme Court",
+        "Trump administration",
+        "Temporary Protected Status",
+        "TPS",
+        "Haitians",
+        "Syrians",
+        "DHS",
+        "Department of Homeland Security",
+        "Mullin v. Doe",
+        "Trump v. Miot",
+        "Haitian Bridge Alliance",
+        "S.4814"
+      ],
+      "first_seen": "2026-06-29",
+      "last_seen": "2026-07-01",
+      "episodes": [
+        "2026-06-29",
+        "2026-07-01"
+      ],
+      "summary": "The Supreme Court ruled to allow the Trump administration to terminate TPS for Haitians and Syrians, limiting judicial review. Advocates are urging Congress to pass a legalization bill for affected individuals. The implications for TPS holders remain uncertain.",
+      "status": "developing"
+    },
+    {
+      "thread_id": "russia-ukraine-conflict",
+      "label": "Russia-Ukraine Conflict",
+      "entities": [
+        "Russia",
+        "Ukraine",
+        "Moscow",
+        "Kyiv",
+        "NATO",
+        "EU"
+      ],
+      "first_seen": "2026-07-01",
+      "last_seen": "2026-07-02",
+      "episodes": [
+        "2026-07-01",
+        "2026-07-02"
+      ],
+      "summary": "Russia has intensified its attacks on Ukraine, launching missile and drone strikes targeting energy infrastructure. The situation remains dire with significant casualties reported. The conflict continues to escalate.",
+      "status": "developing"
+    }
+  ],
+  "closed_stories": [
+    "Federal appeals court blocks Trump EPA from scrapping stricter Biden-era soot standard",
+    "House of the Dragon mid-season episode shifts focus from dragons to logistics famine and naval blockades",
+    "LeBron James opts out of Lakers contract triggering NBA free agency power shift",
+    "France records 1000 excess deaths during extreme heat episode across Europe",
+    "Lahore tutoring center roof collapse kills 14 school age children in Pakistan"
+  ],
+  "single_day_stories": [
+    "ACCC sues Amazon for adding ads to Prime Video without refunds",
+    "UK CMA proposes allowing app developers to steer users to cheaper payment options",
+    "South Korea formalizes national AI plan as survival strategy",
+    "NBA trade sends Giannis Antetokounmpo and Bobby Portis to Miami Heat",
+    "New study reveals intense UV light destroys PFAS forever chemicals",
+    "Japanese yen slips past 165 per dollar raising concerns about Bank of Japan intervention tolerance",
+    "Verve Therapeutics reports 55 percent LDL drop with single CRISPR PCSK9 infusion",
+    "Netflix rebooting Little House on the Prairie with family friendly comfort TV angle",
+    "US Iran cross border strikes pause amid stalled negotiations on sanctions relief",
+    "ICE detains over 10,000 people nationwide in scaled-up enforcement surge",
+    "June jobs report shows sharp slowdown with only 57,000 new jobs added",
+    "Samsung commits 140 trillion won to South Korea AI chip and display buildout",
+    "Vienna researchers stretch magnon lifetimes by factor of 100 to 18 microseconds",
+    "Federal judge orders Trump administration to restore censored history displays in parks",
+    "Nord Stream pipeline sabotage indictment targets Ukrainian state authorities",
+    "India and Japan deepen ties on AI energy and security amid global uncertainty",
+    "US probes Iran for potential economic opening despite decades of mistrust",
+    "AI economic footprint measurement remains elusive as software reshapes labor and fraud"
+  ],
+  "iso_week": "2026-W27",
+  "start_date": "2026-06-29",
+  "end_date": "2026-07-05"
+}

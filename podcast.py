@@ -78,11 +78,21 @@ RECAPS_DIR.mkdir(parents=True, exist_ok=True)
 
 PPLX_URL = "https://api.perplexity.ai/chat/completions"
 OPENAI_TTS_URL = "https://api.openai.com/v1/audio/speech"
+OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 
-RESEARCH_MODEL = "sonar-pro"           # has live web search
-CURATOR_MODEL = "sonar-pro"            # ranks & balances the topic pool
-SCRIPT_MODEL = "sonar-pro"             # writer
-RECAP_MODEL = "sonar"                  # cheapest tier — extraction task, no search needed
+# ─── LLM ROLES ───────────────────────────────────────────────────────────────
+# Generation and every editorial JUDGMENT (curate / dedupe / fact-check / recency
+# / memory-review / buzz) run on OpenAI. Perplexity is reduced to a thin, NON-
+# CRITICAL base-tier `sonar` live-search supplement for breaking developments and
+# X/Twitter buzz that the raw feeds miss — a sonar outage can no longer crash a run.
+# The news itself is aggregated from raw sources (RSS / Reddit / Substack); OpenAI
+# decides what to keep. All model ids are env-overridable for easy tuning.
+SCRIPT_MODEL  = os.environ.get("SCRIPT_MODEL",  "gpt-4o")       # writer (quality-critical)
+CURATOR_MODEL = os.environ.get("CURATOR_MODEL", "gpt-4o-mini")  # keep / route / aggregate
+JUDGE_MODEL   = os.environ.get("JUDGE_MODEL",   "gpt-4o-mini")  # fact-check / recency / currency / pass-2 / buzz / markets
+SEARCH_MODEL  = os.environ.get("SEARCH_MODEL",  "sonar")        # base-tier residual live search (non-critical)
+RECAP_MODEL   = os.environ.get("RECAP_MODEL",   "gpt-4o-mini")  # recap / digest extraction
+RESEARCH_MODEL = SEARCH_MODEL          # legacy alias: the residual live-search beat
 
 TTS_MODEL = "gpt-4o-mini-tts"
 HOST_A_VOICE = "nova"                  # Maya — analytical
@@ -388,6 +398,55 @@ def pplx_chat(prompt: str, model: str = RESEARCH_MODEL, max_tokens: int = 2000,
     raise RuntimeError(f"pplx_chat failed: {last_err}")
 
 
+def openai_chat(prompt: str, model: str = SCRIPT_MODEL, max_tokens: int = 2000,
+                system: str | None = None, temperature: float = 0.4,
+                retries: int = 3) -> str:
+    """Call OpenAI Chat Completions. Same contract as pplx_chat (returns text)."""
+    messages: list[dict[str, str]] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+
+    last_err: Exception | None = None
+    for attempt in range(retries):
+        try:
+            r = httpx.post(
+                OPENAI_CHAT_URL,
+                json=payload,
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                timeout=180,
+            )
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            last_err = e
+            print(f"[openai_chat] attempt {attempt+1} failed: {e}", file=sys.stderr)
+            time.sleep(3 * (attempt + 1))
+    raise RuntimeError(f"openai_chat failed: {last_err}")
+
+
+def llm_chat(prompt: str, model: str = SCRIPT_MODEL, max_tokens: int = 2000,
+             system: str | None = None, temperature: float = 0.4,
+             retries: int = 3) -> str:
+    """Provider-routing LLM entry point.
+
+    Routes by model id: OpenAI models (``gpt-*`` / ``o1``/``o3``/``o4`` reasoning)
+    go to OpenAI; everything else (``sonar*``) goes to Perplexity. This lets each
+    stage pick a model by role without caring which provider serves it.
+    """
+    is_openai = model.startswith(("gpt", "o1", "o3", "o4", "chatgpt"))
+    fn = openai_chat if is_openai else pplx_chat
+    return fn(prompt, model=model, max_tokens=max_tokens, system=system,
+              temperature=temperature, retries=retries)
+
+
 def _parse_beat_json(raw: str, label: str) -> list[dict[str, Any]]:
     """Best-effort parse of a beat's JSON array of topic dicts.
 
@@ -442,7 +501,7 @@ CRITICAL_BEATS = {"geopolitics", "us_politics", "economics", "tech_news",
 
 
 def _run_one_beat(label: str, prompt: str, preamble: str) -> list[dict[str, Any]]:
-    items = _parse_beat_json(pplx_chat(preamble + prompt, RESEARCH_MODEL, 4000), label)
+    items = _parse_beat_json(llm_chat(preamble + prompt, RESEARCH_MODEL, 4000), label)
     for it in items:
         it["beat"] = label
     return items
@@ -677,11 +736,11 @@ def build_real_markets_snapshot() -> str:
             + "Do NOT cite specific numbers — those are handled separately. Just the vibe.\n"
             + "Return only the sentence, no prefix, no quotes."
         )
-        narrative = pplx_chat(prompt, RESEARCH_MODEL, 200, temperature=0.3).strip()
+        narrative = llm_chat(prompt, JUDGE_MODEL, 200, temperature=0.3).strip()
         # Strip surrounding quotes if present
         narrative = narrative.strip('"\'').strip()
         if narrative:
-            narrative = f"\nMarket vibe (one-liner from Sonar):\n- {narrative}\n"
+            narrative = f"\nMarket vibe (one-liner):\n- {narrative}\n"
     except Exception as e:
         print(f"[markets] narrative call failed (non-fatal): {e}", file=sys.stderr)
         narrative = ""
@@ -709,8 +768,8 @@ def gather_markets() -> str:
             + "\n\nCRITICAL: For EVERY number you return, it MUST come from a source\n"
             + "published in the last 24 hours. Cite source + time after every number.\n"
         )
-        try:
-            return pplx_chat(prompt, RESEARCH_MODEL, 1500, temperature=0.2)
+        try:  # live-search fallback stays on base sonar (needs the web)
+            return llm_chat(prompt, SEARCH_MODEL, 1500, temperature=0.2)
         except Exception as e:
             print(f"[markets] fallback also FAILED: {e}", file=sys.stderr)
             return "(markets data unavailable today)"
@@ -804,7 +863,7 @@ def extract_recap(dialogue: list[dict[str, str]], date_str: str,
         transcript = transcript[:60000] + "\n\n[transcript truncated]"
 
     prompt = f"Date: {date_str}\n\nTRANSCRIPT:\n{transcript}\n\nExtract the recap JSON now."
-    raw = pplx_chat(prompt, model=RECAP_MODEL, max_tokens=3500,
+    raw = llm_chat(prompt, model=RECAP_MODEL, max_tokens=3500,
                     system=RECAP_SYSTEM_PROMPT, temperature=0.1)
 
     cleaned = raw.strip()
@@ -1069,7 +1128,7 @@ def curate_topics(research: dict[str, list[dict[str, Any]]],
     )
 
     try:
-        raw = pplx_chat(user, model=CURATOR_MODEL, max_tokens=8000,
+        raw = llm_chat(user, model=CURATOR_MODEL, max_tokens=8000,
                         system=system, temperature=0.4)
     except Exception as e:  # noqa: BLE001 — the show must ship even if the curator API fails
         print(f"[curator] API call failed ({e}); using deterministic fallback curation",
@@ -1511,7 +1570,7 @@ def currency_check_news(curated: dict[str, Any], date_str: str,
               f"last few days or is older / an anniversary / a prior-year event:\n{numbered}\n\n"
               "Return the JSON now.")
     try:
-        raw = pplx_chat(prompt, model=RESEARCH_MODEL, max_tokens=2000,
+        raw = llm_chat(prompt, model=JUDGE_MODEL, max_tokens=2000,
                         system=CURRENCY_SYSTEM_PROMPT, temperature=0.1)
     except Exception as e:  # noqa: BLE001
         print(f"[currency] check failed (non-fatal): {e}", file=sys.stderr)
@@ -1708,7 +1767,7 @@ def fact_check_script(lines: list[dict[str, str]],
     )
     log: list[str] = []
     try:
-        raw = pplx_chat(prompt, RESEARCH_MODEL, 3000, temperature=0.0)
+        raw = llm_chat(prompt, JUDGE_MODEL, 3000, temperature=0.0)
     except Exception as e:
         log.append(f"[fact-check] verification call FAILED: {e}")
         return lines, log
@@ -1860,7 +1919,7 @@ def recency_audit_script(lines: list[dict[str, str]], date_str: str,
               f"Today is {date_str}. Verify the timing of these statements:\n{numbered}\n\n"
               "Return the verdicts JSON now.")
     try:
-        raw = pplx_chat(prompt, model=RESEARCH_MODEL, max_tokens=4000,
+        raw = llm_chat(prompt, model=JUDGE_MODEL, max_tokens=4000,
                         system=RECENCY_SYSTEM_PROMPT, temperature=0.1)
     except Exception as e:  # noqa: BLE001
         return lines, [f"[recency] verification call failed (non-fatal): {e}"]
@@ -2240,7 +2299,7 @@ def _fetch_podcast_context(headline: str, source: str, url: str | None) -> str |
         f"numbers they cited. If you cannot find the episode, return 'UNKNOWN' exactly."
     )
     try:
-        out = pplx_chat(prompt, RESEARCH_MODEL, 700, temperature=0.2).strip()
+        out = llm_chat(prompt, SEARCH_MODEL, 700, temperature=0.2).strip()
     except Exception as e:
         print(f"[buzz] podcast context fetch failed: {e}", file=sys.stderr)
         return None
@@ -2268,7 +2327,7 @@ def _fetch_essay_context(headline: str, source: str, url: str | None) -> str | N
         f"return 'UNKNOWN' exactly."
     )
     try:
-        out = pplx_chat(prompt, RESEARCH_MODEL, 800, temperature=0.2).strip()
+        out = llm_chat(prompt, SEARCH_MODEL, 800, temperature=0.2).strip()
     except Exception as e:
         print(f"[buzz] essay context fetch failed: {e}", file=sys.stderr)
         return None
@@ -2297,7 +2356,7 @@ def _fetch_tweet_context(headline: str, source: str, url: str | None) -> str | N
         f"verify that person has publicly said this recently, return 'UNKNOWN' exactly."
     )
     try:
-        out = pplx_chat(prompt, RESEARCH_MODEL, 700, temperature=0.2).strip()
+        out = llm_chat(prompt, SEARCH_MODEL, 700, temperature=0.2).strip()
     except Exception as e:
         print(f"[buzz] tweet context fetch failed: {e}", file=sys.stderr)
         return None
@@ -2448,7 +2507,7 @@ def write_segment(seg: dict[str, Any],
     )
 
     max_tokens = max(2500, int(seg["words"] * 4.0))
-    raw = pplx_chat(user_prompt, model=SCRIPT_MODEL, max_tokens=max_tokens,
+    raw = llm_chat(user_prompt, model=SCRIPT_MODEL, max_tokens=max_tokens,
                     system=SCRIPT_SEGMENT_SYSTEM_PROMPT, temperature=0.7)
 
     cleaned = raw.strip()
@@ -2652,7 +2711,7 @@ def run_two_pass_curation(curated: dict[str, Any], recap_block: str,
     weekly = memory.latest_weekly_digest(RECAPS_DIR)
     return curator_mod.memory_review(
         curated, recaps_block=recap_block, open_threads=open_threads,
-        weekly_digest=weekly, date_str=date_str, chat_fn=pplx_chat,
+        weekly_digest=weekly, date_str=date_str, chat_fn=llm_chat,
         model=CURATOR_MODEL, preamble=today_preamble(),
         log=lambda m: print(m, file=sys.stderr))
 
@@ -2697,7 +2756,7 @@ def maybe_generate_digests(date_str: str) -> None:
             if week_recaps:
                 digest = curator_mod.generate_weekly_digest(
                     week_recaps, iso_week=iso_wk, start_date=mon.isoformat(),
-                    end_date=sun.isoformat(), chat_fn=pplx_chat, model=RECAP_MODEL)
+                    end_date=sun.isoformat(), chat_fn=llm_chat, model=RECAP_MODEL)
                 path = memory.save_weekly_digest(RECAPS_DIR, digest)
                 print(f"[digest] weekly {path.name}: {len(digest.get('threads', []))} threads",
                       file=sys.stderr)
@@ -2713,7 +2772,7 @@ def maybe_generate_digests(date_str: str) -> None:
                 RECAPS_DIR, last_prev.replace(day=1), last_prev)
             if month_recaps:
                 digest = curator_mod.generate_monthly_digest(
-                    month_recaps, month=mkey, chat_fn=pplx_chat, model=RECAP_MODEL)
+                    month_recaps, month=mkey, chat_fn=llm_chat, model=RECAP_MODEL)
                 path = memory.save_monthly_digest(RECAPS_DIR, digest)
                 print(f"[digest] monthly {path.name}: {len(digest.get('threads', []))} threads",
                       file=sys.stderr)

@@ -2022,6 +2022,18 @@ Each element: {{"speaker": "kore" | "charon", "text": "<line>"}}
 - Each text field MUST be under 800 characters.
 - Avoid stage directions in brackets ([pause], [laughs], etc.) — they get spoken aloud by the TTS.
 
+LENGTH — CRITICAL (this is long-form audio, NOT a summary)
+Each segment must be FULLY DEVELOPED to its word target. You are given a word target and an approximate
+number of dialogue turns. You MUST:
+- Produce roughly the requested number of turns — a long, sustained back-and-forth, not a quick recap.
+- Go DEEP on each topic: state it, add concrete detail and numbers, both hosts react, one pushes back,
+  draw out the "so what," bring an example or analogy, THEN transition. Several exchanges per topic.
+- NEVER wrap up early, cut to a conclusion, or write "and that's the story." Keep the conversation going
+  until the length target is reached. If you're running short, add a second angle, a counterpoint, a
+  concrete example, or a genuine tangent — depth, not filler.
+A segment that comes in far under its word target is a FAILURE even if it reads well. Do not summarize —
+converse at length.
+
 RECAP MEMORY USAGE
 You will receive a "RECENT EPISODES" block. Use it as follows:
 - If a story was already covered in a recent episode AND has no real new development, SKIP IT.
@@ -2053,7 +2065,9 @@ EDITOR'S NOTE FOR TODAY
 SEGMENT TO WRITE
 ================
 Segment: {label}
-Word target: {words} words (hit within ±15%)
+Word target: {words} words — HARD REQUIREMENT. Aim within ±10%; do NOT come in short.
+Length: sustain roughly {target_turns} dialogue turns to reach that target. This is a LONG segment —
+go deep on every curated topic with multiple exchanges each; do not summarize and stop.
 This segment's purpose: {purpose}
 Freshness rule for this segment: {freshness}
 
@@ -2487,6 +2501,44 @@ def render_buzzing_block(enriched: list[dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
+def _gen_dialogue_lines(prompt: str, max_tokens: int, seg: dict[str, Any],
+                        date_str: str = "") -> list[dict[str, str]]:
+    """One writer call → validated [{speaker,text,segment,...}] lines (best-effort)."""
+    raw = llm_chat(prompt, model=SCRIPT_MODEL, max_tokens=max_tokens,
+                   system=SCRIPT_SEGMENT_SYSTEM_PROMPT, temperature=0.7)
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```\s*$", "", cleaned)
+    start, end = cleaned.find("["), cleaned.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        cleaned = cleaned[start:end + 1]
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        data = _salvage_dialogue_lines(cleaned)
+        if data:
+            print(f"[segment {seg['key']}] JSON parse failed ({e}); SALVAGED {len(data)} lines",
+                  file=sys.stderr)
+        else:
+            if date_str:
+                dbg = EPISODES_DIR / date_str / f"segment_raw_{seg['key']}.txt"
+                try:
+                    dbg.parent.mkdir(parents=True, exist_ok=True)
+                    dbg.write_text(raw)
+                except Exception:  # noqa: BLE001
+                    pass
+            print(f"[segment {seg['key']}] JSON parse failed: {e}", file=sys.stderr)
+            return []
+    out: list[dict[str, str]] = []
+    for line in data:
+        if (isinstance(line, dict) and line.get("speaker") in ("kore", "charon")
+                and isinstance(line.get("text"), str)):
+            out.append({"speaker": line["speaker"], "text": line["text"],
+                        "segment": seg["key"], "segment_label": seg["label"]})
+    return out
+
+
 def write_segment(seg: dict[str, Any],
                   curated_topics: list[dict[str, Any]],
                   markets: str,
@@ -2527,6 +2579,9 @@ def write_segment(seg: dict[str, Any],
         day_name=_today_obj.strftime("%A"),
         label=seg["label"],
         words=seg["words"],
+        # ~32 words/turn — gives the writer an explicit "keep going this long" target
+        # (GPT models otherwise wrap up a segment in ~15 turns regardless of word goal).
+        target_turns=max(10, round(seg["words"] / 32)),
         purpose=SEGMENT_PURPOSE.get(seg["key"], ""),
         freshness=SEGMENT_FRESHNESS.get(seg["key"], _FRESH_DEFAULT),
         lookback=RECAP_LOOKBACK_DAYS,
@@ -2540,47 +2595,41 @@ def write_segment(seg: dict[str, Any],
     )
 
     max_tokens = max(2500, int(seg["words"] * 4.0))
-    raw = llm_chat(user_prompt, model=SCRIPT_MODEL, max_tokens=max_tokens,
-                    system=SCRIPT_SEGMENT_SYSTEM_PROMPT, temperature=0.7)
+    valid = _gen_dialogue_lines(user_prompt, max_tokens, seg, date_str)
 
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-        cleaned = re.sub(r"\s*```\s*$", "", cleaned)
-    start, end = cleaned.find("["), cleaned.rfind("]")
-    if start != -1 and end != -1 and end > start:
-        cleaned = cleaned[start:end + 1]
+    # CONTINUATION: GPT writers routinely stop well short of a long word target.
+    # If we're materially short, ask the model to CONTINUE the same conversation
+    # (not repeat) with more turns, up to a few extra rounds, until we're near target.
+    target = seg["words"]
 
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError as e:
-        # SALVAGE valid lines from partial output - this was the v2 bug that lost culture/fodder
-        debug_path = EPISODES_DIR / date_str / f"segment_raw_{seg['key']}.txt"
-        debug_path.parent.mkdir(parents=True, exist_ok=True)
-        debug_path.write_text(raw)
-        data = _salvage_dialogue_lines(cleaned)
-        if data:
-            print(f"[segment {seg['key']}] JSON parse failed ({e}); SALVAGED {len(data)} valid lines",
-                  file=sys.stderr)
-        else:
-            print(f"[segment {seg['key']}] JSON parse failed: {e}. Raw saved to {debug_path}",
-                  file=sys.stderr)
-            return []
+    def _wc(lines: list[dict[str, str]]) -> int:
+        return sum(len(l["text"].split()) for l in lines)
 
-    valid = []
-    for line in data:
-        if (isinstance(line, dict)
-                and line.get("speaker") in ("kore", "charon")
-                and isinstance(line.get("text"), str)):
-            valid.append({
-                "speaker": line["speaker"],
-                "text": line["text"],
-                "segment": seg["key"],
-                "segment_label": seg["label"],
-            })
-    words = sum(len(line["text"].split()) for line in valid)
-    print(f"[segment {seg['key']}] {len(valid)} lines, {words} words (target {seg['words']})",
-          file=sys.stderr)
+    rounds = 0
+    while valid and _wc(valid) < target * 0.8 and rounds < 3:
+        rounds += 1
+        so_far = _wc(valid)
+        remaining_turns = max(6, round((target - so_far) / 32))
+        recent = valid[-14:]
+        convo = "\n".join(
+            f'{"Maya" if l["speaker"] == "kore" else "Ben"}: {l["text"]}' for l in recent)
+        cont_prompt = (
+            user_prompt
+            + f"\n\nCONTINUATION — you have written {len(valid)} turns / {so_far} words so far, "
+            f"still SHORT of the {target}-word target. CONTINUE THE SAME conversation from where "
+            f"it left off with about {remaining_turns} MORE turns, going deeper on the topics not "
+            f"yet fully explored. Do NOT repeat or rephrase any line already written; do NOT "
+            f"re-introduce the segment. Output ONLY a JSON array of the ADDITIONAL turns.\n\n"
+            f"CONVERSATION SO FAR (continue from the end; do not repeat):\n{convo}"
+        )
+        more = _gen_dialogue_lines(cont_prompt, max_tokens, seg, date_str)
+        if not more:
+            break
+        valid.extend(more)
+
+    words = _wc(valid)
+    print(f"[segment {seg['key']}] {len(valid)} lines, {words} words "
+          f"(target {seg['words']}, {rounds} continuation round(s))", file=sys.stderr)
     return valid
 
 

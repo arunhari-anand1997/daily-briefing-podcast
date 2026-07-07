@@ -42,6 +42,8 @@ FEEDS: dict[str, list[str]] = {
         "https://www.theguardian.com/world/rss",
         "https://feeds.npr.org/1004/rss.xml",            # NPR World
         "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
+        "https://www.france24.com/en/rss",               # France 24
+        "https://rss.dw.com/rdf/rss-en-world",           # Deutsche Welle
         "https://news.google.com/rss/headlines/section/topic/WORLD?hl=en-US&gl=US&ceid=US:en",
         _gnews("Reuters OR AP world news"),
     ],
@@ -50,6 +52,7 @@ FEEDS: dict[str, list[str]] = {
         "https://feeds.npr.org/1014/rss.xml",            # NPR Politics
         "https://www.theguardian.com/us-news/rss",
         "https://rss.nytimes.com/services/xml/rss/nyt/Politics.xml",
+        "https://feeds.npr.org/1001/rss.xml",            # NPR National
         "https://news.google.com/rss/headlines/section/topic/NATION?hl=en-US&gl=US&ceid=US:en",
         _gnews("US politics Congress White House Supreme Court"),
     ],

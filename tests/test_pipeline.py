@@ -1,6 +1,6 @@
 """Integration tests for the v7 wiring in podcast.py.
 
-The LLM boundary (pplx_chat) and RECAPS_DIR are monkeypatched, so these run
+The LLM boundary (llm_chat) and RECAPS_DIR are monkeypatched, so these run
 without API keys and validate the glue we can't exercise live: Pass 2 labels,
 editorial blocks reaching the writer prompt, recap topic_details, open-threads
 evolution, and digest generation.
@@ -45,7 +45,7 @@ def _recaps_with_thread():
 
 def test_run_two_pass_curation_drops_repeat(monkeypatch, tmp_path):
     monkeypatch.setattr(podcast, "RECAPS_DIR", tmp_path)
-    monkeypatch.setattr(podcast, "pplx_chat",
+    monkeypatch.setattr(podcast, "llm_chat",
                         lambda *a, **k: json.dumps({"labels": [
                             {"headline": "France election heats up", "status": "repeat"}]}))
     out = podcast.run_two_pass_curation(_curated_world(), "recap-block",
@@ -62,7 +62,7 @@ def test_generate_script_injects_editorial_blocks(monkeypatch):
         captured["prompt"] = prompt
         return json.dumps([{"speaker": "kore", "text": "A line about Macron and France."}])
 
-    monkeypatch.setattr(podcast, "pplx_chat", fake_chat)
+    monkeypatch.setattr(podcast, "llm_chat", fake_chat)
     segs = [{"key": "world", "label": "World", "words": 300}]
     podcast.generate_script(_curated_world(status="thread_continuation"), "MKT",
                             "recap-block", segs, "2026-06-25",
@@ -79,7 +79,7 @@ def test_generate_script_no_blocks_when_flag_off(monkeypatch):
         captured["prompt"] = prompt
         return json.dumps([{"speaker": "kore", "text": "x"}])
 
-    monkeypatch.setattr(podcast, "pplx_chat", fake_chat)
+    monkeypatch.setattr(podcast, "llm_chat", fake_chat)
     segs = [{"key": "world", "label": "World", "words": 300}]
     podcast.generate_script(_curated_world(status="thread_continuation"), "MKT",
                             "recap-block", segs, "2026-06-25",
@@ -91,7 +91,7 @@ def test_generate_script_no_blocks_when_flag_off(monkeypatch):
 # ─── recap topic_details ─────────────────────────────────────────────────────
 
 def test_extract_recap_attaches_topic_details(monkeypatch):
-    monkeypatch.setattr(podcast, "pplx_chat", lambda *a, **k: json.dumps(
+    monkeypatch.setattr(podcast, "llm_chat", lambda *a, **k: json.dumps(
         {"headline": "h", "topics": ["France election"], "entities": ["Macron"], "summary": "s"}))
     dialogue = [
         {"speaker": "kore", "text": "Macron's lead is narrowing.", "segment": "world"},
@@ -106,7 +106,7 @@ def test_extract_recap_attaches_topic_details(monkeypatch):
 
 
 def test_extract_recap_no_topic_details_without_curated(monkeypatch):
-    monkeypatch.setattr(podcast, "pplx_chat", lambda *a, **k: json.dumps(
+    monkeypatch.setattr(podcast, "llm_chat", lambda *a, **k: json.dumps(
         {"headline": "h", "topics": [], "entities": [], "summary": "s"}))
     recap = podcast.extract_recap([{"speaker": "kore", "text": "x", "segment": "world"}],
                                   "2026-06-25")
@@ -190,7 +190,7 @@ def test_currency_check_skips_trusted_wire_items(monkeypatch):
         return json.dumps({"items": [{"id": 1, "verdict": "recent",
                                       "actually_happened": "days ago", "reason": "x"}]})
 
-    monkeypatch.setattr(podcast, "pplx_chat", fake_chat)
+    monkeypatch.setattr(podcast, "llm_chat", fake_chat)
     out = podcast.currency_check_news(curated, "2026-07-02")
     # the trusted item is not offered to the verifier...
     assert "One Big Beautiful Bill" not in sent["prompt"]
@@ -228,16 +228,64 @@ def test_cap_pool_keeps_all_wire_and_bounds_total():
     assert all(v <= 7 for v in beat_counts.values())
 
 
+def test_cap_pool_round_robin_no_beat_starved():
+    # 3 fat beats + 1 small LATE beat. A naive beat-by-beat fill exhausts the budget
+    # on the fat beats and gives 'culture_buzz' zero slots (the bug that emptied the
+    # culture/feature segments). Round-robin must still include the late beat.
+    rest = []
+    for b in ("news", "tech", "sci"):
+        rest += [{"headline": f"{b}-{i}", "beat": b} for i in range(40)]
+    rest += [{"headline": f"culture-{i}", "beat": "culture_buzz"} for i in range(5)]
+    capped = podcast._cap_pool(rest, max_total=20, per_beat_cap=7)
+    assert len(capped) <= 20
+    assert "culture_buzz" in {p["beat"] for p in capped}  # late/small beat survived
+
+
+def test_enforce_content_floor_fills_feature_and_culture():
+    curated = {"segments": {"feature": [], "culture": []}}
+    research = {
+        "substack": [{"headline": "A big essay on AI policy"}, {"headline": "Second essay"}],
+        "culture_buzz": [{"headline": "New thriller everyone is streaming"},
+                         {"headline": "Album of the week"}, {"headline": "A viral moment"}],
+    }
+    out = podcast.enforce_content_floor(curated, research, min_feature=2, min_culture=3)
+    assert len(out["segments"]["feature"]) == 2
+    assert len(out["segments"]["culture"]) == 3
+    assert out["segments"]["feature"][0]["beat"] == "substack"
+
+
+def test_enforce_content_floor_leaves_populated_segments():
+    curated = {"segments": {"feature": [{"headline": "already here", "beat": "substack"}],
+                            "culture": [{"headline": "c1"}, {"headline": "c2"}, {"headline": "c3"}]}}
+    research = {"substack": [{"headline": "extra"}], "culture_buzz": [{"headline": "extra2"}]}
+    out = podcast.enforce_content_floor(curated, research, min_feature=1, min_culture=3)
+    assert len(out["segments"]["feature"]) == 1  # floor already met — untouched
+    assert len(out["segments"]["culture"]) == 3
+
+
 def test_cap_pool_noop_when_small():
     pool = [{"headline": "a", "beat": "x"}, {"headline": "b", "beat": "y", "trusted": True}]
     assert podcast._cap_pool(pool, max_total=120) is pool  # unchanged when under the cap
+
+
+def test_merge_research_concatenates_and_dedupes():
+    base = {"tech_news": [{"headline": "Chip X launches"}],
+            "science": [{"headline": "New comet found"}]}
+    extra = {"tech_news": [{"headline": "Chip X launches"},        # dup -> dropped
+                           {"headline": "Robot does a backflip"}],  # new -> kept
+             "sports": [{"headline": "Team wins final"}]}           # new beat
+    podcast._merge_research(base, extra)
+    tech = [it["headline"] for it in base["tech_news"]]
+    assert tech == ["Chip X launches", "Robot does a backflip"]  # dedup, order preserved
+    assert base["sports"][0]["headline"] == "Team wins final"    # new beat added
+    assert len(base["science"]) == 1                             # untouched
 
 
 def test_curate_topics_falls_back_on_api_failure(monkeypatch):
     # A curator API failure (e.g. 400) must NOT crash the run — fall back deterministically.
     def boom(*a, **k):
         raise RuntimeError("400 Bad Request")
-    monkeypatch.setattr(podcast, "pplx_chat", boom)
+    monkeypatch.setattr(podcast, "llm_chat", boom)
     research = {
         "geopolitics": [{"headline": "Iran war escalates with new strikes", "detail": "war", "url": "http://x"}],
         "us_politics": [{"headline": "Senate passes major budget bill", "detail": "vote", "url": "http://y"}],
@@ -262,7 +310,7 @@ def test_currency_check_drops_stale_anniversary_item(monkeypatch):
             {"id": 2, "verdict": "recent", "actually_happened": "last few days", "reason": "ongoing war"},
         ]})
 
-    monkeypatch.setattr(podcast, "pplx_chat", fake_chat)
+    monkeypatch.setattr(podcast, "llm_chat", fake_chat)
     out = podcast.currency_check_news(curated, "2026-07-02")
     heads = [it["headline"] for it in out["segments"]["hard_news"]]
     assert "House passes One Big Beautiful Bill after all-night session" not in heads  # dropped
@@ -271,7 +319,7 @@ def test_currency_check_drops_stale_anniversary_item(monkeypatch):
 
 def test_currency_check_non_fatal_on_api_error(monkeypatch):
     curated = {"segments": {"hard_news": [{"headline": "Some story", "detail": "x"}]}}
-    monkeypatch.setattr(podcast, "pplx_chat", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(podcast, "llm_chat", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     out = podcast.currency_check_news(curated, "2026-07-02")
     assert out["segments"]["hard_news"]  # unchanged, no crash
 
@@ -300,7 +348,7 @@ def test_maybe_generate_digests_weekly_on_sunday(monkeypatch, tmp_path):
     for ds in ("2026-06-24", "2026-06-25", "2026-06-26"):
         (tmp_path / f"{ds}.json").write_text(json.dumps(
             {"date": ds, "topics": ["t"], "entities": ["Macron"]}))
-    monkeypatch.setattr(podcast, "pplx_chat", lambda *a, **k: json.dumps(
+    monkeypatch.setattr(podcast, "llm_chat", lambda *a, **k: json.dumps(
         {"threads": [{"thread_id": "france-election", "label": "France",
                       "episodes": ["2026-06-24"]}],
          "closed_stories": [], "single_day_stories": []}))
@@ -320,7 +368,7 @@ def test_maybe_generate_digests_skips_when_present_and_not_due(monkeypatch, tmp_
     memory.save_monthly_digest(tmp_path, {"month": "2026-05"})
 
     def boom(*a, **k):
-        raise AssertionError("pplx_chat should not be called")
+        raise AssertionError("llm_chat should not be called")
 
-    monkeypatch.setattr(podcast, "pplx_chat", boom)
+    monkeypatch.setattr(podcast, "llm_chat", boom)
     podcast.maybe_generate_digests("2026-06-24")  # must not raise

@@ -88,9 +88,9 @@ def test_content_segments_set_matches_lineup():
 
 def test_writer_template_placeholders_resolve():
     needed = {f for _, f, _, _ in string.Formatter().parse(podcast.SCRIPT_SEGMENT_USER_TEMPLATE) if f}
-    provided = {"today_preamble", "date", "day_name", "label", "words", "purpose", "freshness",
-                "lookback", "recap_block", "research_block", "prior_segments_block", "editor_note",
-                "timeline_block", "running_threads_block"}
+    provided = {"today_preamble", "date", "day_name", "label", "words", "target_turns", "purpose",
+                "freshness", "lookback", "recap_block", "research_block", "prior_segments_block",
+                "editor_note", "timeline_block", "running_threads_block"}
     assert needed == provided
 
 

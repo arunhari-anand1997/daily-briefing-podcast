@@ -59,6 +59,7 @@ import curator as curator_mod
 import editorial
 import macro as macro_mod
 import news_feeds
+import raw_sources
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
@@ -78,11 +79,21 @@ RECAPS_DIR.mkdir(parents=True, exist_ok=True)
 
 PPLX_URL = "https://api.perplexity.ai/chat/completions"
 OPENAI_TTS_URL = "https://api.openai.com/v1/audio/speech"
+OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 
-RESEARCH_MODEL = "sonar-pro"           # has live web search
-CURATOR_MODEL = "sonar-pro"            # ranks & balances the topic pool
-SCRIPT_MODEL = "sonar-pro"             # writer
-RECAP_MODEL = "sonar"                  # cheapest tier — extraction task, no search needed
+# ─── LLM ROLES ───────────────────────────────────────────────────────────────
+# Generation and every editorial JUDGMENT (curate / dedupe / fact-check / recency
+# / memory-review / buzz) run on OpenAI. Perplexity is reduced to a thin, NON-
+# CRITICAL base-tier `sonar` live-search supplement for breaking developments and
+# X/Twitter buzz that the raw feeds miss — a sonar outage can no longer crash a run.
+# The news itself is aggregated from raw sources (RSS / Reddit / Substack); OpenAI
+# decides what to keep. All model ids are env-overridable for easy tuning.
+SCRIPT_MODEL  = os.environ.get("SCRIPT_MODEL",  "gpt-4o")       # writer (quality-critical)
+CURATOR_MODEL = os.environ.get("CURATOR_MODEL", "gpt-4o-mini")  # keep / route / aggregate
+JUDGE_MODEL   = os.environ.get("JUDGE_MODEL",   "gpt-4o-mini")  # fact-check / recency / currency / pass-2 / buzz / markets
+SEARCH_MODEL  = os.environ.get("SEARCH_MODEL",  "sonar")        # base-tier residual live search (non-critical)
+RECAP_MODEL   = os.environ.get("RECAP_MODEL",   "gpt-4o-mini")  # recap / digest extraction
+RESEARCH_MODEL = SEARCH_MODEL          # legacy alias: the residual live-search beat
 
 TTS_MODEL = "gpt-4o-mini-tts"
 HOST_A_VOICE = "nova"                  # Maya — analytical
@@ -388,6 +399,55 @@ def pplx_chat(prompt: str, model: str = RESEARCH_MODEL, max_tokens: int = 2000,
     raise RuntimeError(f"pplx_chat failed: {last_err}")
 
 
+def openai_chat(prompt: str, model: str = SCRIPT_MODEL, max_tokens: int = 2000,
+                system: str | None = None, temperature: float = 0.4,
+                retries: int = 3) -> str:
+    """Call OpenAI Chat Completions. Same contract as pplx_chat (returns text)."""
+    messages: list[dict[str, str]] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+
+    last_err: Exception | None = None
+    for attempt in range(retries):
+        try:
+            r = httpx.post(
+                OPENAI_CHAT_URL,
+                json=payload,
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                timeout=180,
+            )
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            last_err = e
+            print(f"[openai_chat] attempt {attempt+1} failed: {e}", file=sys.stderr)
+            time.sleep(3 * (attempt + 1))
+    raise RuntimeError(f"openai_chat failed: {last_err}")
+
+
+def llm_chat(prompt: str, model: str = SCRIPT_MODEL, max_tokens: int = 2000,
+             system: str | None = None, temperature: float = 0.4,
+             retries: int = 3) -> str:
+    """Provider-routing LLM entry point.
+
+    Routes by model id: OpenAI models (``gpt-*`` / ``o1``/``o3``/``o4`` reasoning)
+    go to OpenAI; everything else (``sonar*``) goes to Perplexity. This lets each
+    stage pick a model by role without caring which provider serves it.
+    """
+    is_openai = model.startswith(("gpt", "o1", "o3", "o4", "chatgpt"))
+    fn = openai_chat if is_openai else pplx_chat
+    return fn(prompt, model=model, max_tokens=max_tokens, system=system,
+              temperature=temperature, retries=retries)
+
+
 def _parse_beat_json(raw: str, label: str) -> list[dict[str, Any]]:
     """Best-effort parse of a beat's JSON array of topic dicts.
 
@@ -442,7 +502,7 @@ CRITICAL_BEATS = {"geopolitics", "us_politics", "economics", "tech_news",
 
 
 def _run_one_beat(label: str, prompt: str, preamble: str) -> list[dict[str, Any]]:
-    items = _parse_beat_json(pplx_chat(preamble + prompt, RESEARCH_MODEL, 4000), label)
+    items = _parse_beat_json(llm_chat(preamble + prompt, RESEARCH_MODEL, 4000), label)
     for it in items:
         it["beat"] = label
     return items
@@ -473,6 +533,37 @@ def gather_wire_news() -> dict[str, list[dict[str, Any]]]:
     total = sum(len(v) for v in wire.values())
     print(f"[wire] {total} real articles across {len(wire)} feeds", file=sys.stderr)
     return wire
+
+
+def gather_raw_sources() -> dict[str, list[dict[str, Any]]]:
+    """Real, dated topical/discussion/essay items straight from public feeds.
+
+    Covers the show's non-wire beats (tech, science, culture, sports, essays,
+    discussion) from primary sources — RSS, Hacker News, Substack, Reddit — so the
+    OpenAI curator judges real content instead of Sonar-invented topics. Best-effort.
+    """
+    print("[raw] aggregating raw sources (RSS / HN / Substack / Reddit)…", file=sys.stderr)
+    try:
+        raw = raw_sources.gather_raw_sources(
+            _wire_http_get, log=lambda m: print(m, file=sys.stderr))
+    except Exception as e:  # noqa: BLE001
+        print(f"[raw] aggregation failed (non-fatal): {e}", file=sys.stderr)
+        return {}
+    return raw
+
+
+def _merge_research(base: dict[str, list[dict[str, Any]]],
+                    extra: dict[str, list[dict[str, Any]]]) -> None:
+    """Merge ``extra`` beats into ``base`` in place, concatenating same-named beats
+    and dropping items whose normalized headline already appears in that beat."""
+    for beat, items in extra.items():
+        bucket = base.setdefault(beat, [])
+        seen = {raw_sources._norm_title(it.get("headline", ""))[:80] for it in bucket}
+        for it in items:
+            key = raw_sources._norm_title(it.get("headline", ""))[:80]
+            if key and key not in seen:
+                bucket.append(it)
+                seen.add(key)
 
 
 def gather_research(max_retry_rounds: int = 2) -> dict[str, list[dict[str, Any]]]:
@@ -677,11 +768,11 @@ def build_real_markets_snapshot() -> str:
             + "Do NOT cite specific numbers — those are handled separately. Just the vibe.\n"
             + "Return only the sentence, no prefix, no quotes."
         )
-        narrative = pplx_chat(prompt, RESEARCH_MODEL, 200, temperature=0.3).strip()
+        narrative = llm_chat(prompt, JUDGE_MODEL, 200, temperature=0.3).strip()
         # Strip surrounding quotes if present
         narrative = narrative.strip('"\'').strip()
         if narrative:
-            narrative = f"\nMarket vibe (one-liner from Sonar):\n- {narrative}\n"
+            narrative = f"\nMarket vibe (one-liner):\n- {narrative}\n"
     except Exception as e:
         print(f"[markets] narrative call failed (non-fatal): {e}", file=sys.stderr)
         narrative = ""
@@ -709,8 +800,8 @@ def gather_markets() -> str:
             + "\n\nCRITICAL: For EVERY number you return, it MUST come from a source\n"
             + "published in the last 24 hours. Cite source + time after every number.\n"
         )
-        try:
-            return pplx_chat(prompt, RESEARCH_MODEL, 1500, temperature=0.2)
+        try:  # live-search fallback stays on base sonar (needs the web)
+            return llm_chat(prompt, SEARCH_MODEL, 1500, temperature=0.2)
         except Exception as e:
             print(f"[markets] fallback also FAILED: {e}", file=sys.stderr)
             return "(markets data unavailable today)"
@@ -804,7 +895,7 @@ def extract_recap(dialogue: list[dict[str, str]], date_str: str,
         transcript = transcript[:60000] + "\n\n[transcript truncated]"
 
     prompt = f"Date: {date_str}\n\nTRANSCRIPT:\n{transcript}\n\nExtract the recap JSON now."
-    raw = pplx_chat(prompt, model=RECAP_MODEL, max_tokens=3500,
+    raw = llm_chat(prompt, model=RECAP_MODEL, max_tokens=3500,
                     system=RECAP_SYSTEM_PROMPT, temperature=0.1)
 
     cleaned = raw.strip()
@@ -891,16 +982,17 @@ TRUSTED WIRE ITEMS ARE THE NEWS BACKBONE
 Some candidates are marked `"trusted": true` (beats starting with `wire_`). These are REAL,
 timestamped articles pulled directly from major newsrooms' feeds (BBC, NPR, Guardian, NYT, Al Jazeera,
 plus Reuters/AP via aggregation) — each has a genuine headline, working URL, and `published` date, so
-its event is GUARANTEED to have actually happened on that date. The other candidates come from an
-open-ended AI research pass and can occasionally hallucinate or resurface a year-old event as if fresh.
-Therefore:
-- For HARD_NEWS, POLITICS, and ECONOMY, PREFER trusted wire items. When a wire item and a non-trusted
+its event is GUARANTEED to have actually happened on that date. Most OTHER candidates are also real,
+dated items pulled straight from primary feeds (outlet RSS for tech/science/culture/sports, Hacker News,
+Substack essays, Reddit discussion); a small residual comes from a live-search pass and can occasionally
+resurface a year-old event as if fresh. Therefore:
+- For HARD_NEWS, POLITICS, and ECONOMY, PREFER trusted wire items. When a wire item and a non-wire
   item cover the same story, keep the WIRE one (its URL/date are verified).
-- Build HARD_NEWS primarily from `wire_*` items. Only fall back to non-trusted research for a hard-news
+- Build HARD_NEWS primarily from `wire_*` items. Only fall back to non-wire items for a hard-news
   slot when no wire item covers that story.
-- A non-trusted item making a strong dated claim ("passed Wednesday", "overnight", "this week") that NO
+- A non-wire item making a strong dated claim ("passed Wednesday", "overnight", "this week") that NO
   wire item corroborates is suspect — deprioritize or drop it rather than lead with it.
-- You may still use non-trusted research freely for TECH_AI, SCIENCE, FEATURE, CULTURE, and SPORTS.
+- Use the raw topical/essay/discussion feeds freely for TECH_AI, SCIENCE, FEATURE, CULTURE, and SPORTS.
 
 NO FORUM FILLER IN THE NEWS SEGMENTS
 Reddit / forum discussion threads and "Ask<X>" threads (e.g. r/changemyview, AskHistorians, AskAcademia)
@@ -922,8 +1014,13 @@ lead again — pick a fresh economy angle (a different release, a company/sector
 BALANCE RULES — non-negotiable
 DAILY MINIMUMS: at least 2 substantial politics/world stories (across HARD_NEWS + POLITICS);
 at least 1 economics/business/markets story; at least 1 tech/AI story; at least 2 science stories
-when possible (one practical/near-term, one mind-bending); at least 1 substantial culture story;
-at least 1 sports narrative arc.
+when possible (one practical/near-term, one mind-bending); at least 1 sports narrative arc.
+FEATURE and CULTURE must NOT be empty. FEATURE = the day's 2-3 best long-form arguments — route
+Substack essays, op-eds, interviews, and podcast ideas here (these come from the `substack`/`podcasts`
+beats; a serious essay is exactly what FEATURE is for, so do not drop them for being "opinion").
+CULTURE = 3-5 items about what people are watching/streaming/listening to and talking about — route
+film/TV/music/celebrity/viral items here (these come from the `culture_buzz`/`weird_internet` beats).
+If any candidate plausibly fits FEATURE or CULTURE, place it there rather than returning an empty list.
 DAILY CAPS — enforce these strictly:
 - TECH & AI is CAPPED. Pick at most 4 TECH_AI topics, and NO MORE THAN 3 of them may be AI stories.
   Do not let AI/tech dominate the episode — when in doubt, cut an AI item, not a non-AI one.
@@ -1013,20 +1110,33 @@ CURATOR_PER_BEAT_CAP = 7
 
 def _cap_pool(pool: list[dict[str, Any]], *, max_total: int = CURATOR_POOL_MAX,
               per_beat_cap: int = CURATOR_PER_BEAT_CAP) -> list[dict[str, Any]]:
-    """Trim the candidate pool for the curator prompt without dropping wire items."""
+    """Trim the candidate pool for the curator prompt without dropping wire items.
+
+    ROUND-ROBIN across beats: take each beat's 1st item, then every beat's 2nd, and
+    so on (up to per_beat_cap each) until the budget is full. A naive beat-by-beat
+    fill let early beats eat the whole budget and STARVED late beats (culture, essays,
+    sports) to zero — so those segments came up empty. Round-robin guarantees every
+    beat reaches the curator. Trusted wire items are always kept in full.
+    """
     if len(pool) <= max_total:
         return pool
     wire = [p for p in pool if p.get("trusted")]
     rest = [p for p in pool if not p.get("trusted")]
-    seen: dict[str, int] = {}
-    capped_rest: list[dict[str, Any]] = []
-    for p in rest:  # keep each AI beat's first N (research returns them roughly ranked)
-        b = p.get("beat", "")
-        if seen.get(b, 0) < per_beat_cap:
-            capped_rest.append(p)
-            seen[b] = seen.get(b, 0) + 1
-    combined = wire + capped_rest  # wire first so the global cap never trims it
-    return combined[:max_total]
+    by_beat: dict[str, list[dict[str, Any]]] = {}
+    for p in rest:  # group, preserving each beat's (roughly ranked) order
+        by_beat.setdefault(p.get("beat", ""), []).append(p)
+
+    budget = max(0, max_total - len(wire))
+    picked: list[dict[str, Any]] = []
+    for i in range(per_beat_cap):
+        if len(picked) >= budget:
+            break
+        for items in by_beat.values():
+            if i < len(items):
+                picked.append(items[i])
+                if len(picked) >= budget:
+                    break
+    return wire + picked
 
 
 def curate_topics(research: dict[str, list[dict[str, Any]]],
@@ -1069,7 +1179,7 @@ def curate_topics(research: dict[str, list[dict[str, Any]]],
     )
 
     try:
-        raw = pplx_chat(user, model=CURATOR_MODEL, max_tokens=8000,
+        raw = llm_chat(user, model=CURATOR_MODEL, max_tokens=8000,
                         system=system, temperature=0.4)
     except Exception as e:  # noqa: BLE001 — the show must ship even if the curator API fails
         print(f"[curator] API call failed ({e}); using deterministic fallback curation",
@@ -1464,6 +1574,52 @@ def enforce_news_floor(curated: dict[str, Any], research: dict[str, list[dict[st
     return curated
 
 
+# Feature = the day's best long-form arguments (essays / interviews / podcasts).
+# Culture = what people are watching / listening to / talking about.
+_FEATURE_BEATS = ["substack", "podcasts", "ai_frontier"]
+_CULTURE_BEATS = ["culture_buzz", "weird_internet", "reddit"]
+MIN_FEATURE = 2
+MIN_CULTURE = 3
+
+
+def enforce_content_floor(curated: dict[str, Any], research: dict[str, list[dict[str, Any]]],
+                          *, min_feature: int = MIN_FEATURE,
+                          min_culture: int = MIN_CULTURE) -> dict[str, Any]:
+    """Guarantee feature + culture aren't empty when raw material exists.
+
+    The curator (especially a smaller model) sometimes assigns 0 topics to feature or
+    culture even when the Substack / culture feeds returned plenty — dropping two whole
+    segments (~20 min of show). This tops each up DIRECTLY from its source research
+    beats (the full, uncapped pool), so a fair-but-imperfect curator can't starve them.
+    """
+    segs = curated.setdefault("segments", {})
+    log: list[str] = []
+
+    def hl(it: dict[str, Any]) -> str:
+        return (it.get("headline") or "").strip().lower()[:80]
+
+    placed = {hl(it) for items in segs.values() for it in (items or []) if hl(it)}
+    for seg_key, beats, floor in (("feature", _FEATURE_BEATS, min_feature),
+                                  ("culture", _CULTURE_BEATS, min_culture)):
+        cur = segs.get(seg_key) or []
+        added = 0
+        for beat in beats:
+            for it in research.get(beat, []) or []:
+                if len(cur) >= floor:
+                    break
+                if hl(it) and hl(it) not in placed:
+                    cur.append({**it, "beat": beat})
+                    placed.add(hl(it))
+                    added += 1
+        segs[seg_key] = cur
+        if added:
+            log.append(f"[content-floor] {seg_key} topped up with {added} item(s) "
+                       f"from {', '.join(beats)}")
+    for line in log:
+        print(line, file=sys.stderr)
+    return curated
+
+
 # ─── CURRENCY CHECK (drop stale/anniversary items before writing) ─────────────
 # The research beats occasionally hallucinate a prior-year event as brand-new —
 # e.g. Sonar reported the One Big Beautiful Bill Act (passed July 2025) as if the
@@ -1511,7 +1667,7 @@ def currency_check_news(curated: dict[str, Any], date_str: str,
               f"last few days or is older / an anniversary / a prior-year event:\n{numbered}\n\n"
               "Return the JSON now.")
     try:
-        raw = pplx_chat(prompt, model=RESEARCH_MODEL, max_tokens=2000,
+        raw = llm_chat(prompt, model=JUDGE_MODEL, max_tokens=2000,
                         system=CURRENCY_SYSTEM_PROMPT, temperature=0.1)
     except Exception as e:  # noqa: BLE001
         print(f"[currency] check failed (non-fatal): {e}", file=sys.stderr)
@@ -1708,7 +1864,7 @@ def fact_check_script(lines: list[dict[str, str]],
     )
     log: list[str] = []
     try:
-        raw = pplx_chat(prompt, RESEARCH_MODEL, 3000, temperature=0.0)
+        raw = llm_chat(prompt, JUDGE_MODEL, 3000, temperature=0.0)
     except Exception as e:
         log.append(f"[fact-check] verification call FAILED: {e}")
         return lines, log
@@ -1860,7 +2016,7 @@ def recency_audit_script(lines: list[dict[str, str]], date_str: str,
               f"Today is {date_str}. Verify the timing of these statements:\n{numbered}\n\n"
               "Return the verdicts JSON now.")
     try:
-        raw = pplx_chat(prompt, model=RESEARCH_MODEL, max_tokens=4000,
+        raw = llm_chat(prompt, model=JUDGE_MODEL, max_tokens=4000,
                         system=RECENCY_SYSTEM_PROMPT, temperature=0.1)
     except Exception as e:  # noqa: BLE001
         return lines, [f"[recency] verification call failed (non-fatal): {e}"]
@@ -1930,6 +2086,18 @@ Each element: {{"speaker": "kore" | "charon", "text": "<line>"}}
 - Each text field MUST be under 800 characters.
 - Avoid stage directions in brackets ([pause], [laughs], etc.) — they get spoken aloud by the TTS.
 
+LENGTH — CRITICAL (this is long-form audio, NOT a summary)
+Each segment must be FULLY DEVELOPED to its word target. You are given a word target and an approximate
+number of dialogue turns. You MUST:
+- Produce roughly the requested number of turns — a long, sustained back-and-forth, not a quick recap.
+- Go DEEP on each topic: state it, add concrete detail and numbers, both hosts react, one pushes back,
+  draw out the "so what," bring an example or analogy, THEN transition. Several exchanges per topic.
+- NEVER wrap up early, cut to a conclusion, or write "and that's the story." Keep the conversation going
+  until the length target is reached. If you're running short, add a second angle, a counterpoint, a
+  concrete example, or a genuine tangent — depth, not filler.
+A segment that comes in far under its word target is a FAILURE even if it reads well. Do not summarize —
+converse at length.
+
 RECAP MEMORY USAGE
 You will receive a "RECENT EPISODES" block. Use it as follows:
 - If a story was already covered in a recent episode AND has no real new development, SKIP IT.
@@ -1961,7 +2129,9 @@ EDITOR'S NOTE FOR TODAY
 SEGMENT TO WRITE
 ================
 Segment: {label}
-Word target: {words} words (hit within ±15%)
+Word target: {words} words — HARD REQUIREMENT. Aim within ±10%; do NOT come in short.
+Length: sustain roughly {target_turns} dialogue turns to reach that target. This is a LONG segment —
+go deep on every curated topic with multiple exchanges each; do not summarize and stop.
 This segment's purpose: {purpose}
 Freshness rule for this segment: {freshness}
 
@@ -2240,7 +2410,7 @@ def _fetch_podcast_context(headline: str, source: str, url: str | None) -> str |
         f"numbers they cited. If you cannot find the episode, return 'UNKNOWN' exactly."
     )
     try:
-        out = pplx_chat(prompt, RESEARCH_MODEL, 700, temperature=0.2).strip()
+        out = llm_chat(prompt, SEARCH_MODEL, 700, temperature=0.2).strip()
     except Exception as e:
         print(f"[buzz] podcast context fetch failed: {e}", file=sys.stderr)
         return None
@@ -2268,7 +2438,7 @@ def _fetch_essay_context(headline: str, source: str, url: str | None) -> str | N
         f"return 'UNKNOWN' exactly."
     )
     try:
-        out = pplx_chat(prompt, RESEARCH_MODEL, 800, temperature=0.2).strip()
+        out = llm_chat(prompt, SEARCH_MODEL, 800, temperature=0.2).strip()
     except Exception as e:
         print(f"[buzz] essay context fetch failed: {e}", file=sys.stderr)
         return None
@@ -2297,7 +2467,7 @@ def _fetch_tweet_context(headline: str, source: str, url: str | None) -> str | N
         f"verify that person has publicly said this recently, return 'UNKNOWN' exactly."
     )
     try:
-        out = pplx_chat(prompt, RESEARCH_MODEL, 700, temperature=0.2).strip()
+        out = llm_chat(prompt, SEARCH_MODEL, 700, temperature=0.2).strip()
     except Exception as e:
         print(f"[buzz] tweet context fetch failed: {e}", file=sys.stderr)
         return None
@@ -2395,6 +2565,44 @@ def render_buzzing_block(enriched: list[dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
+def _gen_dialogue_lines(prompt: str, max_tokens: int, seg: dict[str, Any],
+                        date_str: str = "") -> list[dict[str, str]]:
+    """One writer call → validated [{speaker,text,segment,...}] lines (best-effort)."""
+    raw = llm_chat(prompt, model=SCRIPT_MODEL, max_tokens=max_tokens,
+                   system=SCRIPT_SEGMENT_SYSTEM_PROMPT, temperature=0.7)
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```\s*$", "", cleaned)
+    start, end = cleaned.find("["), cleaned.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        cleaned = cleaned[start:end + 1]
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        data = _salvage_dialogue_lines(cleaned)
+        if data:
+            print(f"[segment {seg['key']}] JSON parse failed ({e}); SALVAGED {len(data)} lines",
+                  file=sys.stderr)
+        else:
+            if date_str:
+                dbg = EPISODES_DIR / date_str / f"segment_raw_{seg['key']}.txt"
+                try:
+                    dbg.parent.mkdir(parents=True, exist_ok=True)
+                    dbg.write_text(raw)
+                except Exception:  # noqa: BLE001
+                    pass
+            print(f"[segment {seg['key']}] JSON parse failed: {e}", file=sys.stderr)
+            return []
+    out: list[dict[str, str]] = []
+    for line in data:
+        if (isinstance(line, dict) and line.get("speaker") in ("kore", "charon")
+                and isinstance(line.get("text"), str)):
+            out.append({"speaker": line["speaker"], "text": line["text"],
+                        "segment": seg["key"], "segment_label": seg["label"]})
+    return out
+
+
 def write_segment(seg: dict[str, Any],
                   curated_topics: list[dict[str, Any]],
                   markets: str,
@@ -2435,6 +2643,9 @@ def write_segment(seg: dict[str, Any],
         day_name=_today_obj.strftime("%A"),
         label=seg["label"],
         words=seg["words"],
+        # ~32 words/turn — gives the writer an explicit "keep going this long" target
+        # (GPT models otherwise wrap up a segment in ~15 turns regardless of word goal).
+        target_turns=max(10, round(seg["words"] / 32)),
         purpose=SEGMENT_PURPOSE.get(seg["key"], ""),
         freshness=SEGMENT_FRESHNESS.get(seg["key"], _FRESH_DEFAULT),
         lookback=RECAP_LOOKBACK_DAYS,
@@ -2448,47 +2659,41 @@ def write_segment(seg: dict[str, Any],
     )
 
     max_tokens = max(2500, int(seg["words"] * 4.0))
-    raw = pplx_chat(user_prompt, model=SCRIPT_MODEL, max_tokens=max_tokens,
-                    system=SCRIPT_SEGMENT_SYSTEM_PROMPT, temperature=0.7)
+    valid = _gen_dialogue_lines(user_prompt, max_tokens, seg, date_str)
 
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-        cleaned = re.sub(r"\s*```\s*$", "", cleaned)
-    start, end = cleaned.find("["), cleaned.rfind("]")
-    if start != -1 and end != -1 and end > start:
-        cleaned = cleaned[start:end + 1]
+    # CONTINUATION: GPT writers routinely stop well short of a long word target.
+    # If we're materially short, ask the model to CONTINUE the same conversation
+    # (not repeat) with more turns, up to a few extra rounds, until we're near target.
+    target = seg["words"]
 
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError as e:
-        # SALVAGE valid lines from partial output - this was the v2 bug that lost culture/fodder
-        debug_path = EPISODES_DIR / date_str / f"segment_raw_{seg['key']}.txt"
-        debug_path.parent.mkdir(parents=True, exist_ok=True)
-        debug_path.write_text(raw)
-        data = _salvage_dialogue_lines(cleaned)
-        if data:
-            print(f"[segment {seg['key']}] JSON parse failed ({e}); SALVAGED {len(data)} valid lines",
-                  file=sys.stderr)
-        else:
-            print(f"[segment {seg['key']}] JSON parse failed: {e}. Raw saved to {debug_path}",
-                  file=sys.stderr)
-            return []
+    def _wc(lines: list[dict[str, str]]) -> int:
+        return sum(len(l["text"].split()) for l in lines)
 
-    valid = []
-    for line in data:
-        if (isinstance(line, dict)
-                and line.get("speaker") in ("kore", "charon")
-                and isinstance(line.get("text"), str)):
-            valid.append({
-                "speaker": line["speaker"],
-                "text": line["text"],
-                "segment": seg["key"],
-                "segment_label": seg["label"],
-            })
-    words = sum(len(line["text"].split()) for line in valid)
-    print(f"[segment {seg['key']}] {len(valid)} lines, {words} words (target {seg['words']})",
-          file=sys.stderr)
+    rounds = 0
+    while valid and _wc(valid) < target * 0.8 and rounds < 3:
+        rounds += 1
+        so_far = _wc(valid)
+        remaining_turns = max(6, round((target - so_far) / 32))
+        recent = valid[-14:]
+        convo = "\n".join(
+            f'{"Maya" if l["speaker"] == "kore" else "Ben"}: {l["text"]}' for l in recent)
+        cont_prompt = (
+            user_prompt
+            + f"\n\nCONTINUATION — you have written {len(valid)} turns / {so_far} words so far, "
+            f"still SHORT of the {target}-word target. CONTINUE THE SAME conversation from where "
+            f"it left off with about {remaining_turns} MORE turns, going deeper on the topics not "
+            f"yet fully explored. Do NOT repeat or rephrase any line already written; do NOT "
+            f"re-introduce the segment. Output ONLY a JSON array of the ADDITIONAL turns.\n\n"
+            f"CONVERSATION SO FAR (continue from the end; do not repeat):\n{convo}"
+        )
+        more = _gen_dialogue_lines(cont_prompt, max_tokens, seg, date_str)
+        if not more:
+            break
+        valid.extend(more)
+
+    words = _wc(valid)
+    print(f"[segment {seg['key']}] {len(valid)} lines, {words} words "
+          f"(target {seg['words']}, {rounds} continuation round(s))", file=sys.stderr)
     return valid
 
 
@@ -2652,7 +2857,7 @@ def run_two_pass_curation(curated: dict[str, Any], recap_block: str,
     weekly = memory.latest_weekly_digest(RECAPS_DIR)
     return curator_mod.memory_review(
         curated, recaps_block=recap_block, open_threads=open_threads,
-        weekly_digest=weekly, date_str=date_str, chat_fn=pplx_chat,
+        weekly_digest=weekly, date_str=date_str, chat_fn=llm_chat,
         model=CURATOR_MODEL, preamble=today_preamble(),
         log=lambda m: print(m, file=sys.stderr))
 
@@ -2697,7 +2902,7 @@ def maybe_generate_digests(date_str: str) -> None:
             if week_recaps:
                 digest = curator_mod.generate_weekly_digest(
                     week_recaps, iso_week=iso_wk, start_date=mon.isoformat(),
-                    end_date=sun.isoformat(), chat_fn=pplx_chat, model=RECAP_MODEL)
+                    end_date=sun.isoformat(), chat_fn=llm_chat, model=RECAP_MODEL)
                 path = memory.save_weekly_digest(RECAPS_DIR, digest)
                 print(f"[digest] weekly {path.name}: {len(digest.get('threads', []))} threads",
                       file=sys.stderr)
@@ -2713,7 +2918,7 @@ def maybe_generate_digests(date_str: str) -> None:
                 RECAPS_DIR, last_prev.replace(day=1), last_prev)
             if month_recaps:
                 digest = curator_mod.generate_monthly_digest(
-                    month_recaps, month=mkey, chat_fn=pplx_chat, model=RECAP_MODEL)
+                    month_recaps, month=mkey, chat_fn=llm_chat, model=RECAP_MODEL)
                 path = memory.save_monthly_digest(RECAPS_DIR, digest)
                 print(f"[digest] monthly {path.name}: {len(digest.get('threads', []))} threads",
                       file=sys.stderr)
@@ -2948,9 +3153,13 @@ def main() -> int:
     (work_dir / "recap_context.txt").write_text(recap_block)
 
     print(f"[2/7] Wide-net research ({len(BEATS)} beats)…", file=sys.stderr)
-    research = gather_research()
-    # Trusted, grounded news backbone: real RSS articles from major newsrooms. These
-    # wire_* beats become the primary source for hard news (Sonar stays for discovery).
+    research = gather_research()          # thin residual live-search (base sonar)
+    # Primary aggregation is RAW SOURCES: real, dated items from RSS / Hacker News /
+    # Substack / Reddit merged into the topical beats. OpenAI (the curator) decides
+    # what to keep — we no longer rely on Sonar to aggregate or analyze the news.
+    _merge_research(research, gather_raw_sources())
+    # Trusted hard-news backbone: real RSS articles from major newsrooms (distinct
+    # wire_* beats). These are what hard news / politics / economy are built from.
     research.update(gather_wire_news())
     (work_dir / "research.json").write_text(json.dumps(research, indent=2))
     total_cands = sum(len(v) for v in research.values())
@@ -2971,6 +3180,7 @@ def main() -> int:
     print("[4c/7] Currency check (drop stale/anniversary news)…", file=sys.stderr)
     curated = currency_check_news(curated, today)                  # drop prior-year events
     curated = enforce_news_floor(curated, research)                # hard_news/politics floor
+    curated = enforce_content_floor(curated, research)             # feature/culture floor
     (work_dir / "curated.json").write_text(json.dumps(curated, indent=2))
 
     print(f"[5/7] Script ({len(segments)} segments, multi-pass)…", file=sys.stderr)

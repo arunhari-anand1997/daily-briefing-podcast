@@ -60,6 +60,7 @@ import editorial
 import macro as macro_mod
 import news_feeds
 import raw_sources
+import gmail_sources
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
@@ -552,6 +553,26 @@ def gather_raw_sources() -> dict[str, list[dict[str, Any]]]:
     return raw
 
 
+def gather_gmail_news() -> dict[str, list[dict[str, Any]]]:
+    """Curated newsletter material from the reader's Gmail 'news' label (via IMAP).
+
+    High-signal, hand-filtered feed reusing the SMTP app password for IMAP read
+    access. Best-effort: no creds / unreachable / missing label → {}.
+    """
+    label = os.environ.get("GMAIL_NEWS_LABEL", "news")
+    print(f"[gmail] reading newsletters from label '{label}'…", file=sys.stderr)
+    try:
+        return gmail_sources.gather_gmail_news(
+            address=os.environ.get("GMAIL_ADDRESS"),
+            app_password=os.environ.get("GMAIL_APP_PASSWORD"),
+            label=label,
+            log=lambda m: print(m, file=sys.stderr),
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"[gmail] failed (non-fatal): {e}", file=sys.stderr)
+        return {}
+
+
 def _merge_research(base: dict[str, list[dict[str, Any]]],
                     extra: dict[str, list[dict[str, Any]]]) -> None:
     """Merge ``extra`` beats into ``base`` in place, concatenating same-named beats
@@ -1016,11 +1037,14 @@ DAILY MINIMUMS: at least 2 substantial politics/world stories (across HARD_NEWS 
 at least 1 economics/business/markets story; at least 1 tech/AI story; at least 2 science stories
 when possible (one practical/near-term, one mind-bending); at least 1 sports narrative arc.
 FEATURE and CULTURE must NOT be empty. FEATURE = the day's 2-3 best long-form arguments — route
-Substack essays, op-eds, interviews, and podcast ideas here (these come from the `substack`/`podcasts`
-beats; a serious essay is exactly what FEATURE is for, so do not drop them for being "opinion").
-CULTURE = 3-5 items about what people are watching/streaming/listening to and talking about — route
-film/TV/music/celebrity/viral items here (these come from the `culture_buzz`/`weird_internet` beats).
+Substack essays, op-eds, interviews, newsletter deep-dives, and podcast conversations here (from the
+`substack`/`newsletters`/`podcasts` beats; a serious essay is exactly what FEATURE is for, so do not
+drop it for being "opinion"). CULTURE = 3-5 items about what people are watching/streaming/listening to
+and talking about — film/TV/streaming, celebrity, viral moments, and MUSIC with a bias toward rap/hip-hop,
+house/electronic, and Latin/Spanish releases (from the `culture_buzz`/`music`/`weird_internet` beats).
 If any candidate plausibly fits FEATURE or CULTURE, place it there rather than returning an empty list.
+The `newsletters` beat is the reader's own curated newsletters — high-signal; weight it accordingly and
+route each item to whichever segment fits its content.
 DAILY CAPS — enforce these strictly:
 - TECH & AI is CAPPED. Pick at most 4 TECH_AI topics, and NO MORE THAN 3 of them may be AI stories.
   Do not let AI/tech dominate the episode — when in doubt, cut an AI item, not a non-AI one.
@@ -1100,12 +1124,12 @@ def _normalize_pool(research: dict[str, list[dict[str, Any]]]) -> list[dict[str,
     return flat
 
 
-# Cap the curator's candidate pool. An oversized prompt makes Perplexity 400 (seen
-# at ~122 candidates + a big recap; adding the wire beats pushed it to 169 and the
-# curator silently fell back to deterministic routing). Keep ALL trusted wire items
-# (the grounded backbone) and cap the AI-discovery beats per-beat, then bound total.
-CURATOR_POOL_MAX = 120
-CURATOR_PER_BEAT_CAP = 7
+# Cap the curator's candidate pool. The old, tight cap (120) existed because
+# Perplexity 400'd on big prompts; the curator now runs on OpenAI (128k context), so
+# we can let far more of the expanded raw-source aggregation through. Keep ALL trusted
+# wire items and round-robin the rest per-beat so no beat is starved.
+CURATOR_POOL_MAX = 200
+CURATOR_PER_BEAT_CAP = 12
 
 
 def _cap_pool(pool: list[dict[str, Any]], *, max_total: int = CURATOR_POOL_MAX,
@@ -1576,8 +1600,8 @@ def enforce_news_floor(curated: dict[str, Any], research: dict[str, list[dict[st
 
 # Feature = the day's best long-form arguments (essays / interviews / podcasts).
 # Culture = what people are watching / listening to / talking about.
-_FEATURE_BEATS = ["substack", "podcasts", "ai_frontier"]
-_CULTURE_BEATS = ["culture_buzz", "weird_internet", "reddit"]
+_FEATURE_BEATS = ["substack", "newsletters", "podcasts", "ai_frontier"]
+_CULTURE_BEATS = ["culture_buzz", "music", "weird_internet", "reddit"]
 MIN_FEATURE = 2
 MIN_CULTURE = 3
 
@@ -3158,6 +3182,9 @@ def main() -> int:
     # Substack / Reddit merged into the topical beats. OpenAI (the curator) decides
     # what to keep — we no longer rely on Sonar to aggregate or analyze the news.
     _merge_research(research, gather_raw_sources())
+    # Curated newsletters from the reader's Gmail 'news' label — a distinct,
+    # high-signal 'newsletters' beat the curator can route by content.
+    _merge_research(research, gather_gmail_news())
     # Trusted hard-news backbone: real RSS articles from major newsrooms (distinct
     # wire_* beats). These are what hard news / politics / economy are built from.
     research.update(gather_wire_news())

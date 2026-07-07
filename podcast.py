@@ -1014,8 +1014,13 @@ lead again — pick a fresh economy angle (a different release, a company/sector
 BALANCE RULES — non-negotiable
 DAILY MINIMUMS: at least 2 substantial politics/world stories (across HARD_NEWS + POLITICS);
 at least 1 economics/business/markets story; at least 1 tech/AI story; at least 2 science stories
-when possible (one practical/near-term, one mind-bending); at least 1 substantial culture story;
-at least 1 sports narrative arc.
+when possible (one practical/near-term, one mind-bending); at least 1 sports narrative arc.
+FEATURE and CULTURE must NOT be empty. FEATURE = the day's 2-3 best long-form arguments — route
+Substack essays, op-eds, interviews, and podcast ideas here (these come from the `substack`/`podcasts`
+beats; a serious essay is exactly what FEATURE is for, so do not drop them for being "opinion").
+CULTURE = 3-5 items about what people are watching/streaming/listening to and talking about — route
+film/TV/music/celebrity/viral items here (these come from the `culture_buzz`/`weird_internet` beats).
+If any candidate plausibly fits FEATURE or CULTURE, place it there rather than returning an empty list.
 DAILY CAPS — enforce these strictly:
 - TECH & AI is CAPPED. Pick at most 4 TECH_AI topics, and NO MORE THAN 3 of them may be AI stories.
   Do not let AI/tech dominate the episode — when in doubt, cut an AI item, not a non-AI one.
@@ -1105,20 +1110,33 @@ CURATOR_PER_BEAT_CAP = 7
 
 def _cap_pool(pool: list[dict[str, Any]], *, max_total: int = CURATOR_POOL_MAX,
               per_beat_cap: int = CURATOR_PER_BEAT_CAP) -> list[dict[str, Any]]:
-    """Trim the candidate pool for the curator prompt without dropping wire items."""
+    """Trim the candidate pool for the curator prompt without dropping wire items.
+
+    ROUND-ROBIN across beats: take each beat's 1st item, then every beat's 2nd, and
+    so on (up to per_beat_cap each) until the budget is full. A naive beat-by-beat
+    fill let early beats eat the whole budget and STARVED late beats (culture, essays,
+    sports) to zero — so those segments came up empty. Round-robin guarantees every
+    beat reaches the curator. Trusted wire items are always kept in full.
+    """
     if len(pool) <= max_total:
         return pool
     wire = [p for p in pool if p.get("trusted")]
     rest = [p for p in pool if not p.get("trusted")]
-    seen: dict[str, int] = {}
-    capped_rest: list[dict[str, Any]] = []
-    for p in rest:  # keep each AI beat's first N (research returns them roughly ranked)
-        b = p.get("beat", "")
-        if seen.get(b, 0) < per_beat_cap:
-            capped_rest.append(p)
-            seen[b] = seen.get(b, 0) + 1
-    combined = wire + capped_rest  # wire first so the global cap never trims it
-    return combined[:max_total]
+    by_beat: dict[str, list[dict[str, Any]]] = {}
+    for p in rest:  # group, preserving each beat's (roughly ranked) order
+        by_beat.setdefault(p.get("beat", ""), []).append(p)
+
+    budget = max(0, max_total - len(wire))
+    picked: list[dict[str, Any]] = []
+    for i in range(per_beat_cap):
+        if len(picked) >= budget:
+            break
+        for items in by_beat.values():
+            if i < len(items):
+                picked.append(items[i])
+                if len(picked) >= budget:
+                    break
+    return wire + picked
 
 
 def curate_topics(research: dict[str, list[dict[str, Any]]],
@@ -1551,6 +1569,52 @@ def enforce_news_floor(curated: dict[str, Any], research: dict[str, list[dict[st
 
     if not segs.get("hard_news"):
         log.append("[news-floor] WARNING: hard_news still empty — no news-beat items available")
+    for line in log:
+        print(line, file=sys.stderr)
+    return curated
+
+
+# Feature = the day's best long-form arguments (essays / interviews / podcasts).
+# Culture = what people are watching / listening to / talking about.
+_FEATURE_BEATS = ["substack", "podcasts", "ai_frontier"]
+_CULTURE_BEATS = ["culture_buzz", "weird_internet", "reddit"]
+MIN_FEATURE = 2
+MIN_CULTURE = 3
+
+
+def enforce_content_floor(curated: dict[str, Any], research: dict[str, list[dict[str, Any]]],
+                          *, min_feature: int = MIN_FEATURE,
+                          min_culture: int = MIN_CULTURE) -> dict[str, Any]:
+    """Guarantee feature + culture aren't empty when raw material exists.
+
+    The curator (especially a smaller model) sometimes assigns 0 topics to feature or
+    culture even when the Substack / culture feeds returned plenty — dropping two whole
+    segments (~20 min of show). This tops each up DIRECTLY from its source research
+    beats (the full, uncapped pool), so a fair-but-imperfect curator can't starve them.
+    """
+    segs = curated.setdefault("segments", {})
+    log: list[str] = []
+
+    def hl(it: dict[str, Any]) -> str:
+        return (it.get("headline") or "").strip().lower()[:80]
+
+    placed = {hl(it) for items in segs.values() for it in (items or []) if hl(it)}
+    for seg_key, beats, floor in (("feature", _FEATURE_BEATS, min_feature),
+                                  ("culture", _CULTURE_BEATS, min_culture)):
+        cur = segs.get(seg_key) or []
+        added = 0
+        for beat in beats:
+            for it in research.get(beat, []) or []:
+                if len(cur) >= floor:
+                    break
+                if hl(it) and hl(it) not in placed:
+                    cur.append({**it, "beat": beat})
+                    placed.add(hl(it))
+                    added += 1
+        segs[seg_key] = cur
+        if added:
+            log.append(f"[content-floor] {seg_key} topped up with {added} item(s) "
+                       f"from {', '.join(beats)}")
     for line in log:
         print(line, file=sys.stderr)
     return curated
@@ -3116,6 +3180,7 @@ def main() -> int:
     print("[4c/7] Currency check (drop stale/anniversary news)…", file=sys.stderr)
     curated = currency_check_news(curated, today)                  # drop prior-year events
     curated = enforce_news_floor(curated, research)                # hard_news/politics floor
+    curated = enforce_content_floor(curated, research)             # feature/culture floor
     (work_dir / "curated.json").write_text(json.dumps(curated, indent=2))
 
     print(f"[5/7] Script ({len(segments)} segments, multi-pass)…", file=sys.stderr)

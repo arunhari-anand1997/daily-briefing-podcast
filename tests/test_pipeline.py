@@ -228,6 +228,41 @@ def test_cap_pool_keeps_all_wire_and_bounds_total():
     assert all(v <= 7 for v in beat_counts.values())
 
 
+def test_cap_pool_round_robin_no_beat_starved():
+    # 3 fat beats + 1 small LATE beat. A naive beat-by-beat fill exhausts the budget
+    # on the fat beats and gives 'culture_buzz' zero slots (the bug that emptied the
+    # culture/feature segments). Round-robin must still include the late beat.
+    rest = []
+    for b in ("news", "tech", "sci"):
+        rest += [{"headline": f"{b}-{i}", "beat": b} for i in range(40)]
+    rest += [{"headline": f"culture-{i}", "beat": "culture_buzz"} for i in range(5)]
+    capped = podcast._cap_pool(rest, max_total=20, per_beat_cap=7)
+    assert len(capped) <= 20
+    assert "culture_buzz" in {p["beat"] for p in capped}  # late/small beat survived
+
+
+def test_enforce_content_floor_fills_feature_and_culture():
+    curated = {"segments": {"feature": [], "culture": []}}
+    research = {
+        "substack": [{"headline": "A big essay on AI policy"}, {"headline": "Second essay"}],
+        "culture_buzz": [{"headline": "New thriller everyone is streaming"},
+                         {"headline": "Album of the week"}, {"headline": "A viral moment"}],
+    }
+    out = podcast.enforce_content_floor(curated, research, min_feature=2, min_culture=3)
+    assert len(out["segments"]["feature"]) == 2
+    assert len(out["segments"]["culture"]) == 3
+    assert out["segments"]["feature"][0]["beat"] == "substack"
+
+
+def test_enforce_content_floor_leaves_populated_segments():
+    curated = {"segments": {"feature": [{"headline": "already here", "beat": "substack"}],
+                            "culture": [{"headline": "c1"}, {"headline": "c2"}, {"headline": "c3"}]}}
+    research = {"substack": [{"headline": "extra"}], "culture_buzz": [{"headline": "extra2"}]}
+    out = podcast.enforce_content_floor(curated, research, min_feature=1, min_culture=3)
+    assert len(out["segments"]["feature"]) == 1  # floor already met — untouched
+    assert len(out["segments"]["culture"]) == 3
+
+
 def test_cap_pool_noop_when_small():
     pool = [{"headline": "a", "beat": "x"}, {"headline": "b", "beat": "y", "trusted": True}]
     assert podcast._cap_pool(pool, max_total=120) is pool  # unchanged when under the cap

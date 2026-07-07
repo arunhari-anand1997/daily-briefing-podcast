@@ -59,6 +59,7 @@ import curator as curator_mod
 import editorial
 import macro as macro_mod
 import news_feeds
+import raw_sources
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
@@ -534,6 +535,37 @@ def gather_wire_news() -> dict[str, list[dict[str, Any]]]:
     return wire
 
 
+def gather_raw_sources() -> dict[str, list[dict[str, Any]]]:
+    """Real, dated topical/discussion/essay items straight from public feeds.
+
+    Covers the show's non-wire beats (tech, science, culture, sports, essays,
+    discussion) from primary sources — RSS, Hacker News, Substack, Reddit — so the
+    OpenAI curator judges real content instead of Sonar-invented topics. Best-effort.
+    """
+    print("[raw] aggregating raw sources (RSS / HN / Substack / Reddit)…", file=sys.stderr)
+    try:
+        raw = raw_sources.gather_raw_sources(
+            _wire_http_get, log=lambda m: print(m, file=sys.stderr))
+    except Exception as e:  # noqa: BLE001
+        print(f"[raw] aggregation failed (non-fatal): {e}", file=sys.stderr)
+        return {}
+    return raw
+
+
+def _merge_research(base: dict[str, list[dict[str, Any]]],
+                    extra: dict[str, list[dict[str, Any]]]) -> None:
+    """Merge ``extra`` beats into ``base`` in place, concatenating same-named beats
+    and dropping items whose normalized headline already appears in that beat."""
+    for beat, items in extra.items():
+        bucket = base.setdefault(beat, [])
+        seen = {raw_sources._norm_title(it.get("headline", ""))[:80] for it in bucket}
+        for it in items:
+            key = raw_sources._norm_title(it.get("headline", ""))[:80]
+            if key and key not in seen:
+                bucket.append(it)
+                seen.add(key)
+
+
 def gather_research(max_retry_rounds: int = 2) -> dict[str, list[dict[str, Any]]]:
     """Run all wide-net research beats in parallel, RETRYING any that come back empty.
 
@@ -950,16 +982,17 @@ TRUSTED WIRE ITEMS ARE THE NEWS BACKBONE
 Some candidates are marked `"trusted": true` (beats starting with `wire_`). These are REAL,
 timestamped articles pulled directly from major newsrooms' feeds (BBC, NPR, Guardian, NYT, Al Jazeera,
 plus Reuters/AP via aggregation) — each has a genuine headline, working URL, and `published` date, so
-its event is GUARANTEED to have actually happened on that date. The other candidates come from an
-open-ended AI research pass and can occasionally hallucinate or resurface a year-old event as if fresh.
-Therefore:
-- For HARD_NEWS, POLITICS, and ECONOMY, PREFER trusted wire items. When a wire item and a non-trusted
+its event is GUARANTEED to have actually happened on that date. Most OTHER candidates are also real,
+dated items pulled straight from primary feeds (outlet RSS for tech/science/culture/sports, Hacker News,
+Substack essays, Reddit discussion); a small residual comes from a live-search pass and can occasionally
+resurface a year-old event as if fresh. Therefore:
+- For HARD_NEWS, POLITICS, and ECONOMY, PREFER trusted wire items. When a wire item and a non-wire
   item cover the same story, keep the WIRE one (its URL/date are verified).
-- Build HARD_NEWS primarily from `wire_*` items. Only fall back to non-trusted research for a hard-news
+- Build HARD_NEWS primarily from `wire_*` items. Only fall back to non-wire items for a hard-news
   slot when no wire item covers that story.
-- A non-trusted item making a strong dated claim ("passed Wednesday", "overnight", "this week") that NO
+- A non-wire item making a strong dated claim ("passed Wednesday", "overnight", "this week") that NO
   wire item corroborates is suspect — deprioritize or drop it rather than lead with it.
-- You may still use non-trusted research freely for TECH_AI, SCIENCE, FEATURE, CULTURE, and SPORTS.
+- Use the raw topical/essay/discussion feeds freely for TECH_AI, SCIENCE, FEATURE, CULTURE, and SPORTS.
 
 NO FORUM FILLER IN THE NEWS SEGMENTS
 Reddit / forum discussion threads and "Ask<X>" threads (e.g. r/changemyview, AskHistorians, AskAcademia)
@@ -3007,9 +3040,13 @@ def main() -> int:
     (work_dir / "recap_context.txt").write_text(recap_block)
 
     print(f"[2/7] Wide-net research ({len(BEATS)} beats)…", file=sys.stderr)
-    research = gather_research()
-    # Trusted, grounded news backbone: real RSS articles from major newsrooms. These
-    # wire_* beats become the primary source for hard news (Sonar stays for discovery).
+    research = gather_research()          # thin residual live-search (base sonar)
+    # Primary aggregation is RAW SOURCES: real, dated items from RSS / Hacker News /
+    # Substack / Reddit merged into the topical beats. OpenAI (the curator) decides
+    # what to keep — we no longer rely on Sonar to aggregate or analyze the news.
+    _merge_research(research, gather_raw_sources())
+    # Trusted hard-news backbone: real RSS articles from major newsrooms (distinct
+    # wire_* beats). These are what hard news / politics / economy are built from.
     research.update(gather_wire_news())
     (work_dir / "research.json").write_text(json.dumps(research, indent=2))
     total_cands = sum(len(v) for v in research.values())

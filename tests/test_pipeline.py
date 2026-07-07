@@ -233,6 +233,19 @@ def test_cap_pool_noop_when_small():
     assert podcast._cap_pool(pool, max_total=120) is pool  # unchanged when under the cap
 
 
+def test_merge_research_concatenates_and_dedupes():
+    base = {"tech_news": [{"headline": "Chip X launches"}],
+            "science": [{"headline": "New comet found"}]}
+    extra = {"tech_news": [{"headline": "Chip X launches"},        # dup -> dropped
+                           {"headline": "Robot does a backflip"}],  # new -> kept
+             "sports": [{"headline": "Team wins final"}]}           # new beat
+    podcast._merge_research(base, extra)
+    tech = [it["headline"] for it in base["tech_news"]]
+    assert tech == ["Chip X launches", "Robot does a backflip"]  # dedup, order preserved
+    assert base["sports"][0]["headline"] == "Team wins final"    # new beat added
+    assert len(base["science"]) == 1                             # untouched
+
+
 def test_curate_topics_falls_back_on_api_failure(monkeypatch):
     # A curator API failure (e.g. 400) must NOT crash the run — fall back deterministically.
     def boom(*a, **k):

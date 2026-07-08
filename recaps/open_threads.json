@@ -1,5 +1,5 @@
 {
-  "updated": "2026-07-07",
+  "updated": "2026-07-08",
   "threads": [
     {
       "thread_id": "venezuela_double_earthquake_2026",
@@ -15,14 +15,16 @@
     },
     {
       "thread_id": "us_iran_hostilities_sanctions_waiver_2026",
-      "label": "U.S. Hopes for Investment in Iran Would Break With Decades of History",
+      "label": "Calls for Graham Platner to drop out of Maine Senate race continue to grow",
       "first_episode": "2026-06-26",
-      "last_episode": "2026-07-02",
+      "last_episode": "2026-07-08",
       "next_milestone": "",
       "hooks": [
         "Iran hit a commercial vessel on a UN‑escorted corridor in the Strait of Hormuz, causing the UN to pause a new maritime evacuation plan amid the ongoing U.S.–Iran hostilities we covered with war powers resolutions and sanctions waivers.",
         "An interim U.S.–Iran nuclear accord now grants IAEA inspectors expanded access to Iranian nuclear facilities as Tehran pursues a final deal and sanctions relief, adding a diplomatic layer to the previously covered hostilities and sanctions waiver.",
-        "continuing coverage of an ongoing story"
+        "continuing coverage of an ongoing story",
+        "Top Democrats are calling on Graham Platner to drop out of Maine's Senate race following a sexual assault accusation.",
+        "Pressure continues to mount on Graham Platner to drop out of Maine's U.S. Senate race amid sexual assault allegations."
       ],
       "status": "developing"
     },

@@ -1,5 +1,5 @@
 {
-  "updated": "2026-07-08",
+  "updated": "2026-07-09",
   "threads": [
     {
       "thread_id": "venezuela_double_earthquake_2026",
@@ -15,16 +15,17 @@
     },
     {
       "thread_id": "us_iran_hostilities_sanctions_waiver_2026",
-      "label": "Calls for Graham Platner to drop out of Maine Senate race continue to grow",
+      "label": "Live Updates: U.S. and Iran Sink Into Violent Cycle After Latest Strikes",
       "first_episode": "2026-06-26",
-      "last_episode": "2026-07-08",
+      "last_episode": "2026-07-09",
       "next_milestone": "",
       "hooks": [
-        "Iran hit a commercial vessel on a UN‑escorted corridor in the Strait of Hormuz, causing the UN to pause a new maritime evacuation plan amid the ongoing U.S.–Iran hostilities we covered with war powers resolutions and sanctions waivers.",
-        "An interim U.S.–Iran nuclear accord now grants IAEA inspectors expanded access to Iranian nuclear facilities as Tehran pursues a final deal and sanctions relief, adding a diplomatic layer to the previously covered hostilities and sanctions waiver.",
-        "continuing coverage of an ongoing story",
-        "Top Democrats are calling on Graham Platner to drop out of Maine's Senate race following a sexual assault accusation.",
-        "Pressure continues to mount on Graham Platner to drop out of Maine's U.S. Senate race amid sexual assault allegations."
+        "Pressure continues to mount on Graham Platner to drop out of Maine's U.S. Senate race amid sexual assault allegations.",
+        "New U.S. strikes on Iran have escalated hostilities, collapsing the cease-fire.",
+        "Iran reported U.S. attacks near its nuclear facility, marking a significant escalation.",
+        "Iran has launched new attacks on Gulf nations, intensifying regional tensions.",
+        "Graham Platner has suspended his Senate campaign following a sexual assault allegation.",
+        "Platner's suspension follows serious allegations, impacting the Maine Senate race."
       ],
       "status": "developing"
     },

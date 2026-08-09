@@ -1,0 +1,71 @@
+{
+  "threads": [
+    {
+      "thread_id": "russia-ukraine-conflict",
+      "label": "Russia-Ukraine Conflict",
+      "entities": [
+        "Russia",
+        "Ukraine",
+        "Kyiv",
+        "Moscow"
+      ],
+      "first_seen": "2026-07-01",
+      "last_seen": "2026-07-09",
+      "episodes": [
+        "2026-07-01",
+        "2026-07-02",
+        "2026-07-07",
+        "2026-07-08",
+        "2026-07-09"
+      ],
+      "summary": "Russia has intensified its military actions against Ukraine, including drone and missile strikes. The situation remains volatile with ongoing U.S. involvement and economic implications. Ceasefire efforts have collapsed amidst escalating tensions.",
+      "status": "developing"
+    }
+  ],
+  "closed_stories": [],
+  "single_day_stories": [
+    "US Supreme Court rules on birthright citizenship in Trump v Barbara case",
+    "Supreme Court strikes down coordinated party candidate spending limits for 2026",
+    "Federal Reserve signals July rate hold despite core PCE at 3.4 percent",
+    "UN scientific panel warns unchecked AI poses catastrophic global risks like pandemics",
+    "Verve Therapeutics reports 55 percent LDL drop with single CRISPR PCSK9 infusion",
+    "Noah Smith argues economy entering Great Reallocation into AI green and defense sectors",
+    "Netflix rebooting Little House on the Prairie with family friendly comfort TV angle",
+    "France records 1000 excess deaths during extreme heat episode across Europe",
+    "Lahore tutoring center roof collapse kills 14 school age children in Pakistan",
+    "US Iran cross border strikes pause amid stalled negotiations on sanctions relief",
+    "Anastasiia Berezovska found dead in Ukraine",
+    "Graham Platner faces sexual assault allegations",
+    "U.S. affordability crisis highlighted by survey",
+    "Samsung Electronics forecasts massive profit increase",
+    "Bumblebees exposed to toxic heavy metals",
+    "Explosions in Damascus during Macron's visit",
+    "Iranian strikes on commercial ships in Gulf",
+    "China tests long-range ballistic missile",
+    "Meta faces $1.4 trillion lawsuit over platform design",
+    "AI-driven discoveries in superconductors and exercise science",
+    "Iranian strikes on U.S. military sites",
+    "Graham Platner's Senate race allegations",
+    "U.S. trade deficit widening",
+    "Meta's Muse Image launch and privacy concerns",
+    "Quantum control techniques in physics",
+    "Taylor Swift's wedding at Madison Square Garden",
+    "Marina Mabrey's WNBA scoring record",
+    "Nigel Farage's financial scrutiny",
+    "Trump's NATO summit comments",
+    "China's missile test and global security",
+    "U.S. strikes on Iran and ceasefire collapse",
+    "Graham Platner suspends Senate campaign",
+    "Dedollarization trend among central banks",
+    "Meta's new data center in Alberta",
+    "CERN detects Ωcc⁺ baryon",
+    "My Chemical Romance's Wembley Stadium tour",
+    "Bam Adebayo's historic NBA Finals performance",
+    "Trump's reported wealth since returning to office",
+    "Darfur war crimes accountability developments",
+    "Impact of U.S.-Iran conflict on oil prices",
+    "Political implications of denied disaster aid",
+    "AI advancements and security concerns"
+  ],
+  "month": "2026-07"
+}

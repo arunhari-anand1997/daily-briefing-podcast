@@ -1,0 +1,166 @@
+{
+  "threads": [
+    {
+      "thread_id": "water-shortage-libreville",
+      "label": "Water Shortage Crisis in Libreville",
+      "entities": [
+        "Libreville",
+        "Gabon"
+      ],
+      "first_seen": "2026-08-03",
+      "last_seen": "2026-08-09",
+      "episodes": [
+        "2026-08-03",
+        "2026-08-09"
+      ],
+      "summary": "Libreville is facing a severe water shortage crisis, with ongoing discussions about solutions. The situation remains critical as authorities scramble to address the needs of residents. No clear resolution has been reached yet.",
+      "status": "developing"
+    },
+    {
+      "thread_id": "political-drama-ohio-7th-district",
+      "label": "Political Drama in Ohio's 7th District",
+      "entities": [
+        "Ohio",
+        "Max Miller"
+      ],
+      "first_seen": "2026-08-03",
+      "last_seen": "2026-08-09",
+      "episodes": [
+        "2026-08-03",
+        "2026-08-09"
+      ],
+      "summary": "The political landscape in Ohio's 7th District is heating up with ongoing drama surrounding Max Miller. The situation is evolving as new developments arise. The outcome of the political contest remains uncertain.",
+      "status": "developing"
+    },
+    {
+      "thread_id": "us-job-market-fed-rate-expectations",
+      "label": "U.S. Job Market and Fed Rate Expectations",
+      "entities": [
+        "Federal Reserve"
+      ],
+      "first_seen": "2026-08-03",
+      "last_seen": "2026-08-09",
+      "episodes": [
+        "2026-08-03",
+        "2026-08-09"
+      ],
+      "summary": "The U.S. job market is showing signs of fluctuation, impacting expectations for Federal Reserve rate decisions. Analysts are closely monitoring the situation as it develops. Future rate changes remain uncertain.",
+      "status": "developing"
+    },
+    {
+      "thread_id": "social-engineering-attacks",
+      "label": "Rise in Social Engineering Attacks",
+      "entities": [
+        "Google"
+      ],
+      "first_seen": "2026-08-03",
+      "last_seen": "2026-08-09",
+      "episodes": [
+        "2026-08-03",
+        "2026-08-09"
+      ],
+      "summary": "There has been a notable increase in social engineering attacks, raising concerns among tech companies and users alike. The trend is alarming, and efforts to combat these attacks are ongoing. The situation is still developing.",
+      "status": "developing"
+    },
+    {
+      "thread_id": "climate-change-butterfly-ranges",
+      "label": "Climate Change Impacts on Butterfly Ranges",
+      "entities": [
+        "Nature Ecology"
+      ],
+      "first_seen": "2026-08-03",
+      "last_seen": "2026-08-09",
+      "episodes": [
+        "2026-08-03",
+        "2026-08-09"
+      ],
+      "summary": "Research indicates that climate change is significantly affecting butterfly ranges, prompting discussions on ecological impacts. The findings are concerning, and further studies are needed. The issue remains unresolved.",
+      "status": "developing"
+    },
+    {
+      "thread_id": "nigerian-hostages-freed",
+      "label": "Nigerian Hostages Freed from Jihadist Captivity",
+      "entities": [
+        "Nigeria"
+      ],
+      "first_seen": "2026-08-03",
+      "last_seen": "2026-08-09",
+      "episodes": [
+        "2026-08-03",
+        "2026-08-09"
+      ],
+      "summary": "A group of Nigerian hostages has been freed from jihadist captivity, marking a significant development in the ongoing conflict. While this is a positive outcome, the situation in the region remains tense.",
+      "status": "developing"
+    },
+    {
+      "thread_id": "drone-incident-bulgaria-ukraine",
+      "label": "Drone Incident Near Bulgaria Involving Ukraine",
+      "entities": [
+        "Bulgaria",
+        "Ukraine"
+      ],
+      "first_seen": "2026-08-03",
+      "last_seen": "2026-08-09",
+      "episodes": [
+        "2026-08-03",
+        "2026-08-09"
+      ],
+      "summary": "A drone incident near Bulgaria has raised tensions involving Ukraine, with ongoing investigations into the matter. The implications of this incident are still unfolding.",
+      "status": "developing"
+    },
+    {
+      "thread_id": "wildfires-british-columbia",
+      "label": "Wildfires in British Columbia",
+      "entities": [
+        "British Columbia"
+      ],
+      "first_seen": "2026-08-03",
+      "last_seen": "2026-08-09",
+      "episodes": [
+        "2026-08-03",
+        "2026-08-09"
+      ],
+      "summary": "Wildfires continue to ravage British Columbia, prompting emergency responses and evacuations. The situation is dire, and efforts to control the fires are ongoing.",
+      "status": "developing"
+    },
+    {
+      "thread_id": "migration-dispute-spain-italy",
+      "label": "Migration Dispute Between Spain and Italy",
+      "entities": [
+        "Spain",
+        "Italy"
+      ],
+      "first_seen": "2026-08-03",
+      "last_seen": "2026-08-09",
+      "episodes": [
+        "2026-08-03",
+        "2026-08-09"
+      ],
+      "summary": "A migration dispute has emerged between Spain and Italy, with both countries at odds over handling migrant arrivals. Diplomatic discussions are ongoing, but a resolution has yet to be reached.",
+      "status": "developing"
+    },
+    {
+      "thread_id": "ai-billionaires-philanthropic-goals",
+      "label": "AI Billionaires' Philanthropic Goals",
+      "entities": [
+        "David Silver"
+      ],
+      "first_seen": "2026-08-03",
+      "last_seen": "2026-08-09",
+      "episodes": [
+        "2026-08-03",
+        "2026-08-09"
+      ],
+      "summary": "AI billionaires are outlining their philanthropic goals, aiming to address various global challenges. The initiatives are in the early stages, and their impact remains to be seen.",
+      "status": "developing"
+    }
+  ],
+  "closed_stories": [
+    "Madonna's tribute to William Orbit",
+    "Lionel Messi's absence from Leagues Cup"
+  ],
+  "single_day_stories": [],
+  "iso_week": "2026-W32",
+  "start_date": "2026-08-03",
+  "end_date": "2026-08-09"
+}

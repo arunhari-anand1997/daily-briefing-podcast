@@ -1,5 +1,5 @@
 {
-  "updated": "2026-08-09",
+  "updated": "2026-08-10",
   "threads": [
     {
       "thread_id": "venezuela_double_earthquake_2026",
@@ -31,14 +31,15 @@
     },
     {
       "thread_id": "russia_ukraine_war_2026",
-      "label": "Live Updates: Russia Hammers Ukraine’s Capital in Deadly Attacks",
+      "label": "A Ukrainian drone strike reportedly killed at least 12 inside Russia.",
       "first_episode": "2026-06-26",
-      "last_episode": "2026-07-02",
+      "last_episode": "2026-08-10",
       "next_milestone": "",
       "hooks": [
-        "continuing coverage of an ongoing story"
+        "continuing coverage of an ongoing story",
+        "A Ukrainian drone strike killed at least 12 people and injured 39 in Nizhnekamsk."
       ],
-      "status": "dormant"
+      "status": "developing"
     },
     {
       "thread_id": "us_inflation_fed_policy_2026",
@@ -132,6 +133,28 @@
         "continuing coverage of an ongoing story"
       ],
       "status": "dormant"
+    },
+    {
+      "thread_id": "wildfires_in_british_columbia",
+      "label": "Explosive Canada Wildfire Leaves 1 Dead in British Columbia",
+      "first_episode": "2026-08-10",
+      "last_episode": "2026-08-10",
+      "next_milestone": "",
+      "hooks": [
+        "About 20,000 people were ordered to evacuate over the weekend from the Bald Range fire."
+      ],
+      "status": "developing"
+    },
+    {
+      "thread_id": "typhoon_dolphin",
+      "label": "Typhoon Dolphin disrupted eastern China and Taiwan, triggering evacuations and transport c",
+      "first_episode": "2026-08-10",
+      "last_episode": "2026-08-10",
+      "next_milestone": "",
+      "hooks": [
+        "Typhoon Dolphin caused mass evacuations, flight cancellations, and heavy damage across parts of Taiwan and eastern China."
+      ],
+      "status": "developing"
     }
   ]
 }

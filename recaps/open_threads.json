@@ -1,5 +1,5 @@
 {
-  "updated": "2026-08-10",
+  "updated": "2026-08-11",
   "threads": [
     {
       "thread_id": "venezuela_double_earthquake_2026",
@@ -153,6 +153,17 @@
       "next_milestone": "",
       "hooks": [
         "Typhoon Dolphin caused mass evacuations, flight cancellations, and heavy damage across parts of Taiwan and eastern China."
+      ],
+      "status": "developing"
+    },
+    {
+      "thread_id": "political_drama_in_ohio's_7th_district",
+      "label": "Democrats Plan New Push to Defeat Max Miller in Ohio After Abuse Accusations",
+      "first_episode": "2026-08-11",
+      "last_episode": "2026-08-11",
+      "next_milestone": "",
+      "hooks": [
+        "The Democratic campaign arm added Brian Poindexter to its competitive list."
       ],
       "status": "developing"
     }
